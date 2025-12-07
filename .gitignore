@@ -1,5 +1,5 @@
 venv/
 backend/node_modules/
 backend/__pycache__/
-backend/env/
+backend/.env
 backend/venv/lib/python3.9/site-packages/torch/lib/libtorch_cpu.dylibbackend/.env

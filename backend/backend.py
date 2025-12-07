@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 import openai
+import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 import re
@@ -13,6 +14,7 @@ from rag_retriever import RAGRetriever, create_default_knowledge_base
 # Load environment variables
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 app = FastAPI(title="Hallucination Detector API")
 
@@ -26,17 +28,11 @@ app.add_middleware(
 
 # ---------------- Safe math evaluator ----------------
 def extract_math_from_prompt(prompt: str) -> Optional[str]:
-    """
-    Extract math expression from prompt - only if it looks like a clear calculation
-    More strict to avoid false positives
-    """
-    # Only look for math if prompt contains clear calculation keywords
+    """Extract math expression from prompt"""
     calc_keywords = ['calculate', 'what is', 'solve', 'compute', 'equals', 'equal to']
     if not any(keyword in prompt.lower() for keyword in calc_keywords):
         return None
     
-    # More strict regex - require at least 2 numbers and an operator
-    # Matches patterns like: 5 + 3, 10 * 2, 15.5 - 3.2
     m = re.search(r'(\d+(?:\.\d+)?\s*[\+\-\*\/\^]\s*\d+(?:\.\d+)?(?:\s*[\+\-\*\/\^]\s*\d+(?:\.\d+)?)*)', prompt)
     if m:
         return m.group(1).strip()
@@ -46,13 +42,9 @@ def extract_math_from_prompt(prompt: str) -> Optional[str]:
 def safe_eval_expr(expr: str) -> Optional[float]:
     """Safely evaluate a mathematical expression"""
     try:
-        # Remove whitespace and replace ^ with **
         cleaned = expr.replace(" ", "").replace("^", "**")
-        
-        # Only allow numbers and basic operators for safety
         if not re.match(r'^[\d\.\+\-\*\/\(\)]+$', cleaned):
             return None
-            
         result = eval(cleaned)
         return float(result)
     except Exception as e:
@@ -76,7 +68,7 @@ async def startup_event():
 class AnalysisRequest(BaseModel):
     prompt: str
     response: str
-    use_rag: bool = False
+    use_rag: bool = True  # Default to True since we need RAG
     context: Optional[str] = None
 
 class AnalysisResponse(BaseModel):
@@ -87,114 +79,171 @@ class AnalysisResponse(BaseModel):
     evidence: Optional[List[Dict]] = None
     explanation: str
     rag_used: bool = False
+    judge_explanation: Optional[str] = None
+    openai_score: Optional[float] = None
+    gemini_score: Optional[float] = None
 
 # ---------------- OpenAI-based hallucination score ----------------
-def compute_hhem_score(premise: str, hypothesis: str):
+def compute_openai_score(premise: str, hypothesis: str, evidence_text: str = ""):
     """
-    Uses OpenAI GPT to estimate hallucination score for a response.
-    Returns a hallucination score from 0 to 10 and a confidence from 0 to 1.
+    Uses OpenAI GPT to estimate hallucination score with RAG evidence.
     """
-    prompt = f"""You are a hallucination detector. Your job is to identify if the Response contains false, unsupported, or made-up information compared to what was asked in the Prompt.
-
-Given the following:
+    evidence_section = ""
+    if evidence_text:
+        evidence_section = f"\n\nRelevant Evidence from Knowledge Base:\n{evidence_text}\n"
+    
+    prompt = f"""You are a hallucination detector. Analyze if the Response contains false, unsupported, or made-up information.
 
 Prompt:
 \"\"\"{premise}\"\"\"
 
 Response:
-\"\"\"{hypothesis}\"\"\"
+\"\"\"{hypothesis}\"\"\"{evidence_section}
 
-Analyze if the Response contains hallucinations (false information, made-up facts, or claims not supported by the Prompt or general knowledge).
+Analyze if the Response contains hallucinations (false information, made-up facts, or unsupported claims).
+Use the evidence provided to verify claims.
 
-Return ONLY a valid JSON object with TWO keys (no markdown, no extra text):
-- "hallucination_score": a number from 0 (no hallucination, completely accurate) to 10 (completely hallucinated, totally false)
-- "confidence": a number from 0.0 to 1.0 representing your confidence in the score
+Return ONLY a valid JSON object with THREE keys:
+- "hallucination_score": number from 0 (accurate) to 10 (completely false)
+- "confidence": number from 0.0 to 1.0
+- "reasoning": brief explanation of the score
 
 Scoring guide:
-- 0-2: Response is accurate and well-supported by facts
+- 0-2: Response is accurate and well-supported
 - 3-5: Some minor issues or unsupported claims
-- 6-8: Significant false information or unsupported claims
-- 9-10: Mostly or completely fabricated information (made-up names, places, facts)
+- 6-8: Significant false information
+- 9-10: Mostly fabricated information
 
-Example: If asked "What is the third planet from the sun?" and the response invents fictional planets like "Cerulia" instead of saying "Earth", that would be a 10/10 hallucination.
-
-Return format: {{"hallucination_score": X, "confidence": Y}}
+Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}}
 """
 
     try:
         print(f"\n{'='*60}")
         print(f"Calling OpenAI API...")
-        print(f"Prompt preview: {premise[:100]}...")
-        print(f"Response preview: {hypothesis[:100]}...")
         
-        # Check if API key is set
         if not openai.api_key:
-            raise ValueError("OpenAI API key not set. Check your .env file.")
+            raise ValueError("OpenAI API key not set")
         
         completion = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=150  # Limit tokens since we only need JSON
+            max_tokens=200
         )
 
         text = completion.choices[0].message.content.strip()
         print(f"OpenAI raw output: {text}")
 
-        # Remove markdown code blocks if present
         text = re.sub(r'```json\s*|\s*```', '', text)
-        
-        # Extract JSON safely
         match = re.search(r'\{[^{}]*\}', text)
+        
         if match:
             json_str = match.group()
-            print(f"Extracted JSON: {json_str}")
             result = json.loads(json_str)
             score = float(result.get("hallucination_score", 5.0))
             confidence = float(result.get("confidence", 0.5))
+            reasoning = result.get("reasoning", "No reasoning provided")
             
-            # Validate ranges
             score = max(0.0, min(10.0, score))
             confidence = max(0.0, min(1.0, confidence))
             
-            print(f"✓ Parsed successfully - Score: {score}/10, Confidence: {confidence}")
+            print(f"✓ OpenAI Score: {score}/10, Confidence: {confidence}")
+            return {
+                "hallucination_score": score,
+                "confidence": confidence,
+                "reasoning": reasoning,
+                "raw_logits": [score, 10 - score]
+            }
         else:
-            print(f"✗ Warning: Could not extract JSON from response: {text}")
             raise ValueError("No valid JSON found in API response")
 
-        # Construct raw_logits for reference
-        raw_logits = [score, 10 - score]
-
-        return {
-            "hallucination_score": score,
-            "confidence": confidence,
-            "raw_logits": raw_logits
-        }
-
-    except json.JSONDecodeError as e:
-        print(f"✗ JSON parsing error: {e}")
-        print(f"Attempted to parse: {text if 'text' in locals() else 'N/A'}")
-        error_msg = f"Failed to parse OpenAI response as JSON: {str(e)}"
-        print(f"Raising HTTPException: {error_msg}")
-        raise HTTPException(status_code=500, detail=error_msg)
-    
-    except openai.OpenAIError as e:
-        print(f"✗ OpenAI API Error: {type(e).__name__}")
-        print(f"Error details: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        error_msg = f"OpenAI API error: {str(e)}"
-        print(f"Raising HTTPException: {error_msg}")
-        raise HTTPException(status_code=500, detail=error_msg)
-    
     except Exception as e:
-        print(f"✗ Unexpected error in compute_hhem_score: {type(e).__name__}")
-        print(f"Error message: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        error_msg = f"Unexpected error: {str(e)}"
-        print(f"Raising HTTPException: {error_msg}")
-        raise HTTPException(status_code=500, detail=error_msg)
+        print(f"✗ OpenAI API Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+
+# ---------------- Gemini LLM Judge ----------------
+def gemini_judge(premise: str, hypothesis: str, openai_result: Dict, evidence: List[Dict]) -> Dict:
+    """
+    Uses Gemini as LLM Judge to validate OpenAI's score.
+    """
+    evidence_text = "\n".join([f"- {e.get('document', '')}" for e in evidence]) if evidence else "No evidence available"
+    
+    prompt = f"""You are an LLM Judge evaluating a hallucination detection result.
+
+Original Prompt:
+\"\"\"{premise}\"\"\"
+
+Response Being Evaluated:
+\"\"\"{hypothesis}\"\"\"
+
+Evidence from Knowledge Base:
+{evidence_text}
+
+OpenAI's Analysis:
+- Score: {openai_result['hallucination_score']}/10
+- Confidence: {openai_result['confidence']}
+- Reasoning: {openai_result.get('reasoning', 'N/A')}
+
+Your task: Review this analysis and either AGREE or ADJUST the score based on:
+1. Does the evidence support or contradict the response?
+2. Is OpenAI's score reasonable?
+3. Are there any missed hallucinations or false positives?
+
+Return ONLY a valid JSON object:
+{{
+  "final_score": <number 0-10>,
+  "agreement": <"agree" or "adjusted">,
+  "judge_reasoning": "<your explanation>",
+  "confidence": <number 0.0-1.0>
+}}
+"""
+
+    try:
+        print(f"\n{'='*60}")
+        print(f"Calling Gemini Judge...")
+        
+        # Use gemini-pro for free tier compatibility
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        
+        print(f"Gemini raw output: {text}")
+        
+        text = re.sub(r'```json\s*|\s*```', '', text)
+        match = re.search(r'\{[^{}]*\}', text)
+        
+        if match:
+            json_str = match.group()
+            result = json.loads(json_str)
+            
+            final_score = float(result.get("final_score", openai_result['hallucination_score']))
+            agreement = result.get("agreement", "agree")
+            judge_reasoning = result.get("judge_reasoning", "No reasoning provided")
+            confidence = float(result.get("confidence", openai_result['confidence']))
+            
+            final_score = max(0.0, min(10.0, final_score))
+            confidence = max(0.0, min(1.0, confidence))
+            
+            print(f"✓ Gemini Judge: {final_score}/10 ({agreement})")
+            
+            return {
+                "final_score": final_score,
+                "agreement": agreement,
+                "judge_reasoning": judge_reasoning,
+                "confidence": confidence
+            }
+        else:
+            raise ValueError("No valid JSON from Gemini")
+            
+    except Exception as e:
+        print(f"✗ Gemini Judge Error: {str(e)}")
+        # Fallback to OpenAI score if Gemini fails
+        return {
+            "final_score": openai_result['hallucination_score'],
+            "agreement": "fallback",
+            "judge_reasoning": f"Gemini judge unavailable: {str(e)}",
+            "confidence": openai_result['confidence']
+        }
 
 # ---------------- API Endpoint ----------------
 @app.post("/analyze", response_model=AnalysisResponse)
@@ -205,24 +254,18 @@ async def analyze_hallucination(request: AnalysisRequest):
         print(f"{'='*80}")
         print(f"Prompt: {request.prompt[:150]}...")
         print(f"Response: {request.response[:150]}...")
-        print(f"Use RAG: {request.use_rag}")
         print(f"{'='*80}")
         
         # ---------------- Quick arithmetic check ----------------
         expr = extract_math_from_prompt(request.prompt or "")
-        print(f"Math expression check: {expr if expr else 'None detected'}")
         
         if expr:
             expected = safe_eval_expr(expr)
-            print(f"Expected math result: {expected}")
-            
             if expected is not None:
-                # Look for answer after equals sign, or last number in response
-                # Try patterns like "= 2", "is 2", "equals 2", or just the last number
                 answer_patterns = [
-                    r'=\s*(-?\d+(?:\.\d+)?)',  # After equals sign
-                    r'is\s+(-?\d+(?:\.\d+)?)',  # After "is"
-                    r'equals\s+(-?\d+(?:\.\d+)?)',  # After "equals"
+                    r'=\s*(-?\d+(?:\.\d+)?)',
+                    r'is\s+(-?\d+(?:\.\d+)?)',
+                    r'equals\s+(-?\d+(?:\.\d+)?)',
                 ]
                 
                 resp_val = None
@@ -230,103 +273,117 @@ async def analyze_hallucination(request: AnalysisRequest):
                     match = re.search(pattern, request.response, re.IGNORECASE)
                     if match:
                         resp_val = float(match.group(1))
-                        print(f"Found answer using pattern '{pattern}': {resp_val}")
                         break
                 
-                # If no pattern matched, get the last number in the response
                 if resp_val is None:
                     all_numbers = re.findall(r'(-?\d+(?:\.\d+)?)', request.response)
                     if all_numbers:
                         resp_val = float(all_numbers[-1])
-                        print(f"Using last number in response: {resp_val}")
                 
                 if resp_val is not None:
-                    print(f"Expected: {expected}, Got: {resp_val}")
-                    
                     if abs(resp_val - expected) < 1e-6:
-                        print("✓ Math check PASSED - returning score 0.0")
                         return AnalysisResponse(
                             hallucination_score=0.0,
                             confidence=1.0,
                             raw_logits=[10.0, -10.0],
                             calibrated_score=0.0,
-                            explanation=f"Simple arithmetic detected. Expression `{expr}` evaluates to {expected}, and response matches correctly.",
+                            explanation=f"Simple arithmetic verified. Expression `{expr}` = {expected} ✓",
                             evidence=None,
-                            rag_used=False
+                            rag_used=False,
+                            openai_score=0.0,
+                            gemini_score=0.0
                         )
                     else:
-                        print("✗ Math check FAILED - returning score 10.0")
                         return AnalysisResponse(
                             hallucination_score=10.0,
                             confidence=1.0,
                             raw_logits=[-10.0, 10.0],
                             calibrated_score=10.0,
-                            explanation=f"Simple arithmetic detected. Expression `{expr}` evaluates to {expected}, but response contains {resp_val} (incorrect).",
+                            explanation=f"Arithmetic error. Expected {expected}, got {resp_val} ✗",
                             evidence=None,
-                            rag_used=False
+                            rag_used=False,
+                            openai_score=10.0,
+                            gemini_score=10.0
                         )
-        
-        print("No simple math detected, proceeding to AI analysis...")
 
-        # ---------------- Build enhanced premise ----------------
+        # ---------------- RAG Evidence Retrieval ----------------
         evidence = None
+        evidence_text = ""
         rag_used = False
-        if request.use_rag and rag_retriever is not None:
+        
+        if rag_retriever is not None:
             print("Retrieving evidence from RAG...")
             rag_used = True
             evidence = rag_retriever.retrieve(request.response, k=3)
+            
             if evidence:
-                evidence_text = " ".join([e.get('document', '') for e in evidence])
-                enhanced_premise = f"{request.prompt}\n\nRelevant facts from knowledge base:\n{evidence_text}"
+                evidence_text = "\n".join([
+                    f"{i+1}. {e.get('document', '')} (Score: {e.get('score', 0):.2f})"
+                    for i, e in enumerate(evidence)
+                ])
                 print(f"✓ Retrieved {len(evidence)} documents")
             else:
-                enhanced_premise = request.prompt
                 print("No relevant documents found")
-        else:
-            enhanced_premise = request.prompt
 
-        # ---------------- Compute hallucination ----------------
+        # ---------------- OpenAI Analysis ----------------
         try:
-            result = compute_hhem_score(
-                premise=enhanced_premise,
-                hypothesis=request.response
+            openai_result = compute_openai_score(
+                premise=request.prompt,
+                hypothesis=request.response,
+                evidence_text=evidence_text
             )
         except HTTPException:
-            # Re-raise HTTP exceptions
             raise
         except Exception as e:
-            print(f"✗ Unexpected error in compute_hhem_score: {e}")
-            raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"OpenAI analysis failed: {str(e)}")
 
-        # Use GPT score directly as calibrated
-        calibrated_score = result["hallucination_score"]
+        # ---------------- Gemini LLM Judge ----------------
+        judge_result = gemini_judge(
+            premise=request.prompt,
+            hypothesis=request.response,
+            openai_result=openai_result,
+            evidence=evidence or []
+        )
 
         # ---------------- Build explanation ----------------
-        if calibrated_score <= 3.0:
-            explanation = "✓ Low hallucination risk. The response appears well-grounded and accurate."
-        elif calibrated_score <= 6.0:
-            explanation = "⚠ Moderate hallucination risk. Some claims may need verification."
+        final_score = judge_result['final_score']
+        
+        if final_score <= 3.0:
+            base_explanation = "✓ Low hallucination risk. Response appears accurate."
+        elif final_score <= 6.0:
+            base_explanation = "⚠ Moderate hallucination risk. Some claims need verification."
         else:
-            explanation = "✗ High hallucination risk. Significant discrepancies or false information detected."
-            
+            base_explanation = "✗ High hallucination risk. Significant issues detected."
+        
+        # Add judge insight
+        if judge_result['agreement'] == 'adjusted':
+            judge_note = f"\n\n🔍 LLM Judge: Adjusted from OpenAI's {openai_result['hallucination_score']}/10 to {final_score}/10"
+        else:
+            judge_note = f"\n\n🔍 LLM Judge: Confirmed OpenAI's assessment"
+        
+        explanation = base_explanation + judge_note
+
         if rag_used and evidence:
-            explanation += f"\n\nRAG Analysis: Retrieved {len(evidence)} supporting documents from knowledge base."
+            explanation += f"\n\n📚 Evidence: {len(evidence)} supporting documents analyzed"
 
         print(f"\n{'='*80}")
         print(f"FINAL RESULTS:")
-        print(f"Score: {calibrated_score}/10")
-        print(f"Confidence: {result['confidence']}")
-        print(f"Explanation: {explanation}")
+        print(f"OpenAI Score: {openai_result['hallucination_score']}/10")
+        print(f"Gemini Score: {final_score}/10")
+        print(f"Agreement: {judge_result['agreement']}")
         print(f"{'='*80}\n")
 
         return AnalysisResponse(
-            hallucination_score=result["hallucination_score"],
-            confidence=result["confidence"],
-            raw_logits=result["raw_logits"],
-            calibrated_score=calibrated_score,
+            hallucination_score=final_score,
+            confidence=judge_result['confidence'],
+            raw_logits=openai_result['raw_logits'],
+            calibrated_score=final_score,
             explanation=explanation,
             evidence=evidence if rag_used else None,
-            rag_used=rag_used
+            rag_used=rag_used,
+            judge_explanation=judge_result['judge_reasoning'],
+            openai_score=openai_result['hallucination_score'],
+            gemini_score=final_score
         )
 
     except Exception as e:
@@ -338,50 +395,16 @@ async def analyze_hallucination(request: AnalysisRequest):
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    api_key_set = bool(openai.api_key and openai.api_key != "")
+    openai_key_set = bool(openai.api_key and openai.api_key != "")
+    gemini_key_set = bool(os.getenv("GEMINI_API_KEY"))
+    
     return {
         "status": "healthy",
         "rag_initialized": rag_retriever is not None,
-        "openai_api_key_set": api_key_set,
-        "openai_api_key_preview": f"{openai.api_key[:10]}..." if api_key_set else "Not set"
+        "openai_api_key_set": openai_key_set,
+        "gemini_api_key_set": gemini_key_set
     }
 
-# Test OpenAI endpoint
-@app.get("/test-openai")
-async def test_openai():
-    """Test if OpenAI API is working"""
-    try:
-        if not openai.api_key:
-            return {"status": "error", "message": "OpenAI API key not set"}
-        
-        print("Testing OpenAI API connection...")
-        completion = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Say 'test successful' in JSON format with a key 'message'"}],
-            temperature=0,
-            max_tokens=50
-        )
-        
-        response_text = completion.choices[0].message.content
-        print(f"OpenAI test response: {response_text}")
-        
-        return {
-            "status": "success",
-            "message": "OpenAI API is working",
-            "response": response_text
-        }
-    except Exception as e:
-        print(f"OpenAI test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "status": "error",
-            "message": str(e),
-            "error_type": type(e).__name__
-        }
-
-
-# Run with: uvicorn backend:app --reload
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

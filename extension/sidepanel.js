@@ -1,6 +1,5 @@
-// Side panel JavaScript for Hallucination Detector
+// Side panel JavaScript for Hallucination Detector with Evidence Display
 
-// Configuration
 const API_BASE_URL = 'http://localhost:8000';
 
 // DOM elements
@@ -18,13 +17,12 @@ const responseError = document.getElementById('responseError');
 const resultCard = document.getElementById('resultCard');
 const scoreValue = document.getElementById('scoreValue');
 const scoreDescription = document.getElementById('scoreDescription');
+const evidenceContainer = document.getElementById('evidenceContainer');
 
 // State
 let capturedPrompt = null;
 let capturedResponse = null;
-let lastAnalysisResult = null;
 
-// Initialize: Load stored data
 async function initialize() {
   const data = await chrome.storage.local.get(['capturedPrompt', 'capturedResponse']);
   
@@ -39,26 +37,28 @@ async function initialize() {
   }
   
   updateAnalyzeButton();
-  
-  // Check API health
   checkAPIHealth();
 }
 
-// Check if backend API is running
 async function checkAPIHealth() {
   try {
     const response = await fetch(`${API_BASE_URL}/health`);
     const data = await response.json();
     console.log('API Health:', data);
+    
+    if (!data.openai_api_key_set) {
+      console.warn('OpenAI API key not set');
+    }
+    if (!data.gemini_api_key_set) {
+      console.warn('Gemini API key not set');
+    }
   } catch (error) {
     console.warn('Backend API not available:', error.message);
-    console.log('Make sure to run: python backend.py');
   }
 }
 
 // Capture prompt
 capturePromptBtn.addEventListener('click', async () => {
-  // Check if text is selected on the page first
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const selectionResult = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -98,7 +98,6 @@ capturePromptBtn.addEventListener('click', async () => {
   }
 });
 
-
 // Capture response
 captureResponseBtn.addEventListener('click', async () => {
   captureResponseBtn.disabled = true;
@@ -127,14 +126,13 @@ captureResponseBtn.addEventListener('click', async () => {
   }
 });
 
-// Analyze hallucination using backend API
+// Analyze hallucination
 analyzeBtn.addEventListener('click', async () => {
   analyzeBtn.disabled = true;
   analyzeBtn.innerHTML = '<span class="loading"></span> Analyzing...';
   resultCard.classList.remove('show');
   
   try {
-    // Call the backend API
     const response = await fetch(`${API_BASE_URL}/analyze`, {
       method: 'POST',
       headers: {
@@ -143,37 +141,22 @@ analyzeBtn.addEventListener('click', async () => {
       body: JSON.stringify({
         prompt: capturedPrompt.text,
         response: capturedResponse.text,
-        use_rag: false
+        use_rag: true
       })
     });
     
     if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
+      const errorData = await response.json();
+      throw new Error(errorData.detail || `API error: ${response.status}`);
     }
     
     const result = await response.json();
-    lastAnalysisResult = result;
-    
-    // Display results
     displayResults(result);
-    
-    // Save analysis to storage for report
     await saveAnalysisToStorage(result);
     
   } catch (error) {
     console.error('Analysis error:', error);
-    
-    // Fallback to simple scoring if API fails
-    const fallbackResult = {
-      hallucination_score: Math.floor(Math.random() * 10) + 1,
-      confidence: Math.random() * 0.5 + 0.5, // 50%–100% confidence
-      explanation: 'Using fallback analysis (API unavailable). Please start the backend server.',
-      raw_logits: [0, 0],
-      calibrated_score: null
-    };
-    
-    
-    displayResults(fallbackResult);
+    alert(`Analysis failed: ${error.message}\n\nMake sure the backend is running:\npython backend.py`);
   } finally {
     analyzeBtn.disabled = false;
     analyzeBtn.textContent = 'Get Hallucination Level';
@@ -183,7 +166,7 @@ analyzeBtn.addEventListener('click', async () => {
 function displayResults(result) {
   const score = result.calibrated_score ?? result.hallucination_score;
 
-  // Determine color based on score
+  // Determine color
   let color;
   if (score <= 3.0) {
     color = "#10b981"; // Green
@@ -193,84 +176,123 @@ function displayResults(result) {
     color = "#ef4444"; // Red
   }
 
-  // Update UI
+  // Update score
   scoreValue.textContent = `${score.toFixed(1)}/10`;
   scoreValue.style.color = color;
 
-  // Build detailed description
+  // Build description
   let description = result.explanation || "No explanation available.";
 
-  // Show confidence only if defined and valid
-  if (typeof result.confidence === "number") {
-    description += `\n\nConfidence: ${(result.confidence * 100).toFixed(1)}%`;
-  } else {
-    description += `\n\nConfidence: N/A`;
+  // Add judge information
+  if (result.judge_explanation) {
+    description += `\n\n🔍 Judge Reasoning:\n${result.judge_explanation}`;
   }
 
-  if (result.calibrated_score !== null && result.calibrated_score !== undefined) {
-    description += `\nCalibrated Score: ${result.calibrated_score.toFixed(1)}/10`;
+  // Add scores breakdown
+  if (result.openai_score !== undefined && result.gemini_score !== undefined) {
+    description += `\n\n📊 Scores:\nOpenAI: ${result.openai_score.toFixed(1)}/10\nGemini: ${result.gemini_score.toFixed(1)}/10`;
+  }
+
+  if (typeof result.confidence === "number") {
+    description += `\n\nConfidence: ${(result.confidence * 100).toFixed(1)}%`;
   }
 
   scoreDescription.textContent = description;
   scoreDescription.style.whiteSpace = 'pre-line';
 
-  // Show result card with animation
+  // Display evidence
+  displayEvidence(result.evidence);
+
+  // Show result card
   resultCard.classList.add('show');
 
-  // Scroll to result
   setTimeout(() => {
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, 100);
 
-  // Log detailed results for debugging
-  console.log('Analysis Results:', {
-    score: result.hallucination_score,
-    confidence: result.confidence,
-    raw_logits: result.raw_logits,
-    calibrated_score: result.calibrated_score,
-    explanation: result.explanation
+  console.log('Analysis Results:', result);
+}
+
+function displayEvidence(evidence) {
+  evidenceContainer.innerHTML = '';
+  
+  if (!evidence || evidence.length === 0) {
+    evidenceContainer.innerHTML = '<div class="evidence-empty">No evidence retrieved</div>';
+    return;
+  }
+
+  const evidenceTitle = document.createElement('div');
+  evidenceTitle.className = 'evidence-title';
+  evidenceTitle.textContent = '📚 Supporting Evidence';
+  evidenceContainer.appendChild(evidenceTitle);
+
+  evidence.forEach((item, index) => {
+    const evidenceItem = document.createElement('div');
+    evidenceItem.className = 'evidence-item';
+    
+    const evidenceRank = document.createElement('div');
+    evidenceRank.className = 'evidence-rank';
+    evidenceRank.textContent = `Evidence #${index + 1}`;
+    
+    const evidenceText = document.createElement('div');
+    evidenceText.className = 'evidence-text';
+    evidenceText.textContent = item.document;
+    
+    const evidenceMeta = document.createElement('div');
+    evidenceMeta.className = 'evidence-meta';
+    
+    const source = item.metadata?.source || 'Unknown Source';
+    const topic = item.metadata?.topic || 'General';
+    const url = item.metadata?.url || null;
+    const relevance = item.score ? `Relevance: ${(1 / (1 + item.score)).toFixed(3)}` : '';
+    
+    // Create clickable source link if URL exists
+    let sourceHTML = `<span class="evidence-source">📖 ${source}</span>`;
+    if (url) {
+      sourceHTML = `<a href="${url}" target="_blank" class="evidence-source evidence-link" title="Open source">📖 ${source} 🔗</a>`;
+    }
+    
+    evidenceMeta.innerHTML = `
+      ${sourceHTML}
+      <span class="evidence-topic">🏷️ ${topic}</span>
+      ${relevance ? `<span class="evidence-relevance">${relevance}</span>` : ''}
+    `;
+    
+    evidenceItem.appendChild(evidenceRank);
+    evidenceItem.appendChild(evidenceText);
+    evidenceItem.appendChild(evidenceMeta);
+    evidenceContainer.appendChild(evidenceItem);
   });
 }
 
-
-// Save analysis results to storage for reporting
 async function saveAnalysisToStorage(result) {
   const timestamp = Date.now();
-  
-  // Use calibrated score if available, otherwise fallback to raw hallucination_score
   const scoreToStore = result.calibrated_score ?? result.hallucination_score;
 
   const analysisRecord = {
     timestamp,
-    prompt: capturedPrompt.text.substring(0, 500), // Store first 500 chars
+    prompt: capturedPrompt.text.substring(0, 500),
     response: capturedResponse.text.substring(0, 500),
     score: scoreToStore,
     confidence: result.confidence,
-    raw_logits: result.raw_logits,
-    calibrated_score: result.calibrated_score,
+    openai_score: result.openai_score,
+    gemini_score: result.gemini_score,
+    evidence_count: result.evidence?.length || 0,
     explanation: result.explanation
   };
   
-  // Get existing analyses
   const data = await chrome.storage.local.get(['analysisHistory']);
   const history = data.analysisHistory || [];
-  
-  // Add new analysis
   history.push(analysisRecord);
   
-  // Keep only last 100 analyses
   if (history.length > 100) {
     history.shift();
   }
   
-  // Save back to storage
   await chrome.storage.local.set({ analysisHistory: history });
-  
   console.log('Analysis saved to history');
 }
 
-
-// Update prompt UI
 function updatePromptUI(data) {
   if (data && data.text) {
     promptPreview.textContent = data.text;
@@ -287,7 +309,6 @@ function updatePromptUI(data) {
   }
 }
 
-// Update response UI
 function updateResponseUI(data) {
   if (data && data.text) {
     responsePreview.textContent = data.text;
@@ -304,14 +325,8 @@ function updateResponseUI(data) {
   }
 }
 
-// Update analyze button state
 function updateAnalyzeButton() {
-  if (capturedPrompt && capturedResponse) {
-    analyzeBtn.disabled = false;
-  } else {
-    analyzeBtn.disabled = true;
-  }
+  analyzeBtn.disabled = !(capturedPrompt && capturedResponse);
 }
 
-// Initialize on load
 initialize();
