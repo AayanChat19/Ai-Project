@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 import openai
 import google.generativeai as genai
@@ -70,6 +70,7 @@ class AnalysisRequest(BaseModel):
     response: str
     use_rag: bool = True  # Default to True since we need RAG
     context: Optional[str] = None
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
 class AnalysisResponse(BaseModel):
     hallucination_score: float
@@ -79,12 +80,9 @@ class AnalysisResponse(BaseModel):
     evidence: Optional[List[Dict]] = None
     explanation: str
     rag_used: bool = False
-    judge_explanation: Optional[str] = None
-    openai_score: Optional[float] = None
-    gemini_score: Optional[float] = None
 
 # ---------------- OpenAI-based hallucination score ----------------
-def compute_openai_score(premise: str, hypothesis: str, evidence_text: str = ""):
+def compute_hhem_score(premise: str, hypothesis: str):
     """
     Uses OpenAI GPT to estimate hallucination score with RAG evidence.
     """
@@ -120,6 +118,8 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
     try:
         print(f"\n{'='*60}")
         print(f"Calling OpenAI API...")
+        print(f"Prompt preview: {premise[:100]}...")
+        print(f"Response preview: {hypothesis[:100]}...")
         
         if not openai.api_key:
             raise ValueError("OpenAI API key not set")
@@ -128,7 +128,7 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=200
+            max_tokens=150  # Limit tokens since we only need JSON
         )
 
         text = completion.choices[0].message.content.strip()
@@ -157,84 +157,31 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
         else:
             raise ValueError("No valid JSON found in API response")
 
-    except Exception as e:
-        print(f"✗ OpenAI API Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+        # Construct raw_logits for reference
+        raw_logits = [score, 10 - score]
 
-# ---------------- Gemini LLM Judge ----------------
-def gemini_judge(premise: str, hypothesis: str, openai_result: Dict, evidence: List[Dict]) -> Dict:
-    """
-    Uses Gemini as LLM Judge to validate OpenAI's score.
-    """
-    evidence_text = "\n".join([f"- {e.get('document', '')}" for e in evidence]) if evidence else "No evidence available"
+        return {
+            "hallucination_score": score,
+            "confidence": confidence,
+            "raw_logits": raw_logits
+        }
+
+    except json.JSONDecodeError as e:
+        print(f"✗ JSON parsing error: {e}")
+        print(f"Attempted to parse: {text if 'text' in locals() else 'N/A'}")
+        error_msg = f"Failed to parse OpenAI response as JSON: {str(e)}"
+        print(f"Raising HTTPException: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
     
-    prompt = f"""You are an LLM Judge evaluating a hallucination detection result.
-
-Original Prompt:
-\"\"\"{premise}\"\"\"
-
-Response Being Evaluated:
-\"\"\"{hypothesis}\"\"\"
-
-Evidence from Knowledge Base:
-{evidence_text}
-
-OpenAI's Analysis:
-- Score: {openai_result['hallucination_score']}/10
-- Confidence: {openai_result['confidence']}
-- Reasoning: {openai_result.get('reasoning', 'N/A')}
-
-Your task: Review this analysis and either AGREE or ADJUST the score based on:
-1. Does the evidence support or contradict the response?
-2. Is OpenAI's score reasonable?
-3. Are there any missed hallucinations or false positives?
-
-Return ONLY a valid JSON object:
-{{
-  "final_score": <number 0-10>,
-  "agreement": <"agree" or "adjusted">,
-  "judge_reasoning": "<your explanation>",
-  "confidence": <number 0.0-1.0>
-}}
-"""
-
-    try:
-        print(f"\n{'='*60}")
-        print(f"Calling Gemini Judge...")
-        
-        # Use gemini-pro for free tier compatibility
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        
-        print(f"Gemini raw output: {text}")
-        
-        text = re.sub(r'```json\s*|\s*```', '', text)
-        match = re.search(r'\{[^{}]*\}', text)
-        
-        if match:
-            json_str = match.group()
-            result = json.loads(json_str)
-            
-            final_score = float(result.get("final_score", openai_result['hallucination_score']))
-            agreement = result.get("agreement", "agree")
-            judge_reasoning = result.get("judge_reasoning", "No reasoning provided")
-            confidence = float(result.get("confidence", openai_result['confidence']))
-            
-            final_score = max(0.0, min(10.0, final_score))
-            confidence = max(0.0, min(1.0, confidence))
-            
-            print(f"✓ Gemini Judge: {final_score}/10 ({agreement})")
-            
-            return {
-                "final_score": final_score,
-                "agreement": agreement,
-                "judge_reasoning": judge_reasoning,
-                "confidence": confidence
-            }
-        else:
-            raise ValueError("No valid JSON from Gemini")
-            
+    except openai.OpenAIError as e:
+        print(f"✗ OpenAI API Error: {type(e).__name__}")
+        print(f"Error details: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        error_msg = f"OpenAI API error: {str(e)}"
+        print(f"Raising HTTPException: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
+    
     except Exception as e:
         print(f"✗ Gemini Judge Error: {str(e)}")
         # Fallback to OpenAI score if Gemini fails
@@ -254,7 +201,15 @@ async def analyze_hallucination(request: AnalysisRequest):
         print(f"{'='*80}")
         print(f"Prompt: {request.prompt[:150]}...")
         print(f"Response: {request.response[:150]}...")
+        print(f"Use RAG: {request.use_rag}")
         print(f"{'='*80}")
+
+        # Validate temperature
+        if not (0.0 <= request.temperature <= 2.0):
+            raise HTTPException(
+                status_code=400,
+                detail="Temperature must be between 0.0 and 2.0"
+            )
         
         # ---------------- Quick arithmetic check ----------------
         expr = extract_math_from_prompt(request.prompt or "")
@@ -289,9 +244,7 @@ async def analyze_hallucination(request: AnalysisRequest):
                             calibrated_score=0.0,
                             explanation=f"Simple arithmetic verified. Expression `{expr}` = {expected} ✓",
                             evidence=None,
-                            rag_used=False,
-                            openai_score=0.0,
-                            gemini_score=0.0
+                            rag_used=False
                         )
                     else:
                         return AnalysisResponse(
@@ -301,9 +254,7 @@ async def analyze_hallucination(request: AnalysisRequest):
                             calibrated_score=10.0,
                             explanation=f"Arithmetic error. Expected {expected}, got {resp_val} ✗",
                             evidence=None,
-                            rag_used=False,
-                            openai_score=10.0,
-                            gemini_score=10.0
+                            rag_used=False
                         )
 
         # ---------------- RAG Evidence Retrieval ----------------
@@ -327,10 +278,9 @@ async def analyze_hallucination(request: AnalysisRequest):
 
         # ---------------- OpenAI Analysis ----------------
         try:
-            openai_result = compute_openai_score(
-                premise=request.prompt,
-                hypothesis=request.response,
-                evidence_text=evidence_text
+            result = compute_hhem_score(
+                premise=enhanced_premise,
+                hypothesis=request.response
             )
         except HTTPException:
             raise
@@ -368,9 +318,9 @@ async def analyze_hallucination(request: AnalysisRequest):
 
         print(f"\n{'='*80}")
         print(f"FINAL RESULTS:")
-        print(f"OpenAI Score: {openai_result['hallucination_score']}/10")
-        print(f"Gemini Score: {final_score}/10")
-        print(f"Agreement: {judge_result['agreement']}")
+        print(f"Score: {calibrated_score}/10")
+        print(f"Confidence: {result['confidence']}")
+        print(f"Explanation: {explanation}")
         print(f"{'='*80}\n")
 
         return AnalysisResponse(
@@ -380,10 +330,7 @@ async def analyze_hallucination(request: AnalysisRequest):
             calibrated_score=final_score,
             explanation=explanation,
             evidence=evidence if rag_used else None,
-            rag_used=rag_used,
-            judge_explanation=judge_result['judge_reasoning'],
-            openai_score=openai_result['hallucination_score'],
-            gemini_score=final_score
+            rag_used=rag_used
         )
 
     except Exception as e:

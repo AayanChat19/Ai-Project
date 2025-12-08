@@ -129,6 +129,84 @@
       gap: 12px;
     }
 
+    /* Temperature Control Styles */
+    .temperature-control {
+      background: #f9fafb;
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 15px;
+    }
+
+    .temp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .temp-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #667eea;
+    }
+
+    .temp-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: #764ba2;
+    }
+
+    .slider-container {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .slider-label {
+      font-size: 11px;
+      color: #6b7280;
+      font-weight: 500;
+    }
+
+    input[type="range"] {
+      flex: 1;
+      height: 6px;
+      border-radius: 3px;
+      background: linear-gradient(to right, #48bb78 0%, #ecc94b 50%, #f56565 100%);
+      outline: none;
+      -webkit-appearance: none;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: white;
+      cursor: pointer;
+      border: 3px solid #667eea;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    input[type="range"]::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: white;
+      cursor: pointer;
+      border: 3px solid #667eea;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    .temp-description {
+      font-size: 11px;
+      color: #6b7280;
+      line-height: 1.4;
+      text-align: center;
+    }
+
     .analyze-btn {
       width: 100%;
       padding: 16px;
@@ -274,6 +352,28 @@
       padding: 10px;
     }
 
+    .result-meta {
+      margin-top: 15px;
+      padding-top: 15px;
+      border-top: 1px solid rgba(0,0,0,0.1);
+      font-size: 11px;
+      color: #7c2d12;
+      display: flex;
+      justify-content: center;
+      gap: 15px;
+    }
+
+    .result-meta {
+      margin-top: 15px;
+      padding-top: 15px;
+      border-top: 1px solid rgba(0,0,0,0.1);
+      font-size: 11px;
+      color: #7c2d12;
+      display: flex;
+      justify-content: center;
+      gap: 15px;
+    }
+
     .instruction {
       background: rgba(255, 255, 255, 0.95);
       border-radius: 8px;
@@ -353,7 +453,23 @@
       <div class="error-message" id="responseError"></div>
     </div>
 
+    <!-- NEW: Temperature Control -->
     <div class="card">
+      <div class="temperature-control">
+        <div class="temp-header">
+          <span class="temp-label">🌡️ Analysis Temperature</span>
+          <span class="temp-value" id="tempValue">0.0</span>
+        </div>
+        <div class="slider-container">
+          <span class="slider-label">Strict</span>
+          <input type="range" id="temperature" min="0" max="2" step="0.1" value="0">
+          <span class="slider-label">Creative</span>
+        </div>
+        <div class="temp-description" id="tempDescription">
+          Most consistent scoring - recommended
+        </div>
+      </div>
+
       <button class="analyze-btn" id="analyzeBtn" disabled>
         Get Hallucination Level
       </button>
@@ -366,6 +482,10 @@
       
       <!-- Evidence Container -->
       <div id="evidenceContainer"></div>
+      <div class="result-meta">
+        <span>🌡️ Temp: <strong id="resultTemp">-</strong></span>
+        <span>📊 Confidence: <strong id="resultConfidence">-</strong></span>
+      </div>
     </div>
   </div>
 
