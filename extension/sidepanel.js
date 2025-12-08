@@ -75,15 +75,6 @@ function setupTemperatureSlider() {
   });
 }
 
-// Setup temperature slider
-function setupTemperatureSlider() {
-  temperatureSlider.addEventListener('input', (e) => {
-    const value = parseFloat(e.target.value).toFixed(1);
-    tempValue.textContent = value;
-    tempDescription.textContent = tempDescriptions[value] || 'Custom temperature';
-  });
-}
-
 async function checkAPIHealth() {
   try {
     const response = await fetch(`${API_BASE_URL}/health`);
@@ -190,14 +181,11 @@ analyzeBtn.addEventListener('click', async () => {
         prompt: capturedPrompt.text,
         response: capturedResponse.text,
         temperature: temperature,  // Send temperature to backend
-        use_rag: false
         use_rag: true
       })
     });
-    
+
     if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || `API error: ${response.status}`);
       const errorData = await response.json();
       throw new Error(errorData.detail || `API error: ${response.status}`);
     }
@@ -265,10 +253,6 @@ function displayResults(result) {
   resultTemp.textContent = tempUsed;
   resultConfidence.textContent = `${confidence}%`;
 
-  // Update metadata in results
-  resultTemp.textContent = tempUsed;
-  resultConfidence.textContent = `${confidence}%`;
-
   // Display evidence
   displayEvidence(result.evidence);
 
@@ -287,6 +271,7 @@ function displayResults(result) {
     raw_logits: result.raw_logits,
     calibrated_score: result.calibrated_score,
     explanation: result.explanation
+  });
   console.log('Analysis Results:', result);
 }
 
