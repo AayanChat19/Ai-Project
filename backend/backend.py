@@ -82,7 +82,7 @@ class AnalysisResponse(BaseModel):
     rag_used: bool = False
 
 # ---------------- OpenAI-based hallucination score ----------------
-def compute_hhem_score(premise: str, hypothesis: str):
+def compute_hhem_score(premise: str, hypothesis: str, evidence_text: str = ""):
     """
     Uses OpenAI GPT to estimate hallucination score with RAG evidence.
     """
@@ -183,14 +183,10 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
         raise HTTPException(status_code=500, detail=error_msg)
     
     except Exception as e:
-        print(f"✗ Gemini Judge Error: {str(e)}")
-        # Fallback to OpenAI score if Gemini fails
-        return {
-            "final_score": openai_result['hallucination_score'],
-            "agreement": "fallback",
-            "judge_reasoning": f"Gemini judge unavailable: {str(e)}",
-            "confidence": openai_result['confidence']
-        }
+        print(f"✗ Unexpected error in compute_hhem_score: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 # ---------------- API Endpoint ----------------
 @app.post("/analyze", response_model=AnalysisResponse)
@@ -279,54 +275,41 @@ async def analyze_hallucination(request: AnalysisRequest):
         # ---------------- OpenAI Analysis ----------------
         try:
             result = compute_hhem_score(
-                premise=enhanced_premise,
-                hypothesis=request.response
+                premise=request.prompt,
+                hypothesis=request.response,
+                evidence_text=evidence_text
             )
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"OpenAI analysis failed: {str(e)}")
 
-        # ---------------- Gemini LLM Judge ----------------
-        judge_result = gemini_judge(
-            premise=request.prompt,
-            hypothesis=request.response,
-            openai_result=openai_result,
-            evidence=evidence or []
-        )
-
         # ---------------- Build explanation ----------------
-        final_score = judge_result['final_score']
-        
+        final_score = result['hallucination_score']
+
         if final_score <= 3.0:
             base_explanation = "✓ Low hallucination risk. Response appears accurate."
         elif final_score <= 6.0:
             base_explanation = "⚠ Moderate hallucination risk. Some claims need verification."
         else:
             base_explanation = "✗ High hallucination risk. Significant issues detected."
-        
-        # Add judge insight
-        if judge_result['agreement'] == 'adjusted':
-            judge_note = f"\n\n🔍 LLM Judge: Adjusted from OpenAI's {openai_result['hallucination_score']}/10 to {final_score}/10"
-        else:
-            judge_note = f"\n\n🔍 LLM Judge: Confirmed OpenAI's assessment"
-        
-        explanation = base_explanation + judge_note
+
+        explanation = base_explanation + "\n\n" + result.get('reasoning', '')
 
         if rag_used and evidence:
             explanation += f"\n\n📚 Evidence: {len(evidence)} supporting documents analyzed"
 
         print(f"\n{'='*80}")
         print(f"FINAL RESULTS:")
-        print(f"Score: {calibrated_score}/10")
+        print(f"Score: {final_score}/10")
         print(f"Confidence: {result['confidence']}")
         print(f"Explanation: {explanation}")
         print(f"{'='*80}\n")
 
         return AnalysisResponse(
             hallucination_score=final_score,
-            confidence=judge_result['confidence'],
-            raw_logits=openai_result['raw_logits'],
+            confidence=result['confidence'],
+            raw_logits=result['raw_logits'],
             calibrated_score=final_score,
             explanation=explanation,
             evidence=evidence if rag_used else None,
