@@ -6,11 +6,7 @@ import json
 import os
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import quote_plus
 import time
-
-import os
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,29 +14,29 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 
 class WebSearcher:
-    """
-    Web search integration for RAG fallback
-    Uses multiple strategies for robust search
-    """
+    """Enhanced web search with source reliability ranking"""
     
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
         })
+        
+        # Source reliability scores (higher = more reliable)
+        self.reliability_scores = {
+            'wikipedia': 0.95,
+            'google': 0.90,
+            'semantic_scholar': 0.85,
+            'arxiv': 0.85,
+            'crossref': 0.80,
+            'default': 0.70
+        }
     
     def search_wikipedia(self, query: str, max_results: int = 5) -> List[Dict]:
-        """
-        Search Wikipedia API - MOST RELIABLE, always works
-        """
+        """Search Wikipedia - HIGHEST RELIABILITY"""
         try:
-            # OpenSearch API
             api_url = "https://en.wikipedia.org/w/api.php"
             params = {
                 'action': 'opensearch',
@@ -62,19 +58,20 @@ class WebSearcher:
                     urls = data[3]
                     
                     for title, desc, url in zip(titles, descriptions, urls):
-                        if desc:  # Only include if there's a description
+                        if desc:
                             results.append({
                                 'title': title,
                                 'url': url,
                                 'snippet': desc,
-                                'source': 'Wikipedia'
+                                'source': 'Wikipedia',
+                                'reliability': self.reliability_scores['wikipedia']
                             })
                 
                 if results:
-                    print(f"✓ Found {len(results)} results via Wikipedia")
+                    print(f"✓ Wikipedia: {len(results)} results")
                     return results
                     
-            # If no results from OpenSearch, try TextExtracts API
+            # Fallback to TextExtracts
             params = {
                 'action': 'query',
                 'format': 'json',
@@ -92,31 +89,72 @@ class WebSearcher:
                 pages = data.get('query', {}).get('pages', {})
                 
                 for page_id, page_data in pages.items():
-                    if page_id != '-1':  # Page exists
+                    if page_id != '-1':
                         extract = page_data.get('extract', '')
                         if extract:
-                            # Get first 500 chars
                             snippet = extract[:500] + ('...' if len(extract) > 500 else '')
                             results.append({
                                 'title': page_data.get('title', 'Wikipedia Article'),
                                 'url': page_data.get('fullurl', ''),
                                 'snippet': snippet,
-                                'source': 'Wikipedia'
+                                'source': 'Wikipedia',
+                                'reliability': self.reliability_scores['wikipedia']
                             })
                 
                 if results:
-                    print(f"✓ Found {len(results)} results via Wikipedia TextExtracts")
-                    return results
+                    print(f"✓ Wikipedia (extracts): {len(results)} results")
+                return results
                     
         except Exception as e:
             print(f"Wikipedia error: {e}")
         
         return []
     
+    def search_google_search(self, query: str, max_results: int = 5) -> List[Dict]:
+        """Search Google via Serper API - HIGH RELIABILITY"""
+        if not SERPER_API_KEY:
+            print("⚠ No Serper API key configured")
+            return []
+            
+        try:
+            url = "https://google.serper.dev/search"
+            payload = {"q": query, "num": max_results}
+            headers = {
+                "X-API-KEY": SERPER_API_KEY,
+                "Content-Type": "application/json"
+            }
+
+            response = self.session.post(url, json=payload, headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+
+                if "organic" in data:
+                    for item in data["organic"]:
+                        snippet = item.get("snippet", "")
+                        if len(snippet) > 400:
+                            snippet = snippet[:400] + "..."
+
+                        results.append({
+                            "title": item.get("title", "No title"),
+                            "url": item.get("link", ""),
+                            "snippet": snippet,
+                            "source": "Google",
+                            "reliability": self.reliability_scores['google']
+                        })
+
+                if results:
+                    print(f"✓ Google: {len(results)} results")
+                return results
+
+        except Exception as e:
+            print(f"Google Search error: {e}")
+
+        return []
+    
     def search_semantic_scholar(self, query: str, max_results: int = 3) -> List[Dict]:
-        """
-        Search Semantic Scholar for academic/scientific info (no API key needed)
-        """
+        """Search Semantic Scholar - ACADEMIC RELIABILITY"""
         try:
             api_url = "https://api.semanticscholar.org/graph/v1/paper/search"
             params = {
@@ -134,13 +172,8 @@ class WebSearcher:
                 for paper in data.get('data', []):
                     abstract = paper.get('abstract', '')
                     if abstract:
-                        # Get first 400 chars of abstract
                         snippet = abstract[:400] + ('...' if len(abstract) > 400 else '')
-                        
-                        authors = paper.get('authors', [])
-                        author_names = ', '.join([a.get('name', '') for a in authors[:3]])
                         year = paper.get('year', '')
-                        
                         title = paper.get('title', 'Research Paper')
                         if year:
                             title = f"{title} ({year})"
@@ -149,11 +182,12 @@ class WebSearcher:
                             'title': title,
                             'url': paper.get('url', ''),
                             'snippet': snippet,
-                            'source': f'Semantic Scholar'
+                            'source': 'Semantic Scholar',
+                            'reliability': self.reliability_scores['semantic_scholar']
                         })
                 
                 if results:
-                    print(f"✓ Found {len(results)} results via Semantic Scholar")
+                    print(f"✓ Semantic Scholar: {len(results)} results")
                 return results
                 
         except Exception as e:
@@ -161,241 +195,56 @@ class WebSearcher:
         
         return []
     
-    def search_arxiv(self, query: str, max_results: int = 3) -> List[Dict]:
-        """
-        Search arXiv for scientific papers (good for technical queries)
-        """
-        try:
-            api_url = "http://export.arxiv.org/api/query"
-            params = {
-                'search_query': f'all:{query}',
-                'start': 0,
-                'max_results': max_results,
-                'sortBy': 'relevance',
-                'sortOrder': 'descending'
-            }
-            
-            response = self.session.get(api_url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                from xml.etree import ElementTree as ET
-                root = ET.fromstring(response.content)
-                
-                results = []
-                ns = {'atom': 'http://www.w3.org/2005/Atom'}
-                
-                for entry in root.findall('atom:entry', ns):
-                    title = entry.find('atom:title', ns)
-                    summary = entry.find('atom:summary', ns)
-                    link = entry.find('atom:id', ns)
-                    
-                    if title is not None and summary is not None:
-                        snippet = summary.text.strip()[:400]
-                        if len(summary.text) > 400:
-                            snippet += '...'
-                        
-                        results.append({
-                            'title': title.text.strip(),
-                            'url': link.text if link is not None else '',
-                            'snippet': snippet,
-                            'source': 'arXiv'
-                        })
-                
-                if results:
-                    print(f"✓ Found {len(results)} results via arXiv")
-                return results
-                
-        except Exception as e:
-            print(f"arXiv error: {e}")
-        
-        return []
-    
-    
-    
-    def search_crossref(self, query: str, max_results: int = 3) -> List[Dict]:
-        """
-        Search CrossRef for academic papers (works great, no API key needed)
-        """
-        try:
-            api_url = "https://api.crossref.org/works"
-            params = {
-                'query': query,
-                'rows': max_results,
-                'select': 'title,author,abstract,DOI,URL,published'
-            }
-            
-            response = self.session.get(api_url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-                
-                for item in data.get('message', {}).get('items', []):
-                    title_list = item.get('title', [])
-                    title = title_list[0] if title_list else 'Research Paper'
-                    
-                    abstract = item.get('abstract', '')
-                    doi = item.get('DOI', '')
-                    url = item.get('URL', f"https://doi.org/{doi}" if doi else '')
-                    
-                    # Get year
-                    published = item.get('published', {}).get('date-parts', [[None]])[0]
-                    year = published[0] if published else ''
-                    
-                    # Construct snippet
-                    snippet = abstract if abstract else f"Academic paper"
-                    if year:
-                        snippet = f"({year}) {snippet}"
-                    
-                    results.append({
-                        'title': title,
-                        'url': url,
-                        'snippet': snippet[:500],
-                        'source': 'CrossRef'
-                    })
-                
-                if results:
-                    print(f"✓ Found {len(results)} results via CrossRef")
-                return results
-                
-        except Exception as e:
-            print(f"CrossRef error: {e}")
-        
-        return []
-    
-        
-    def search_google_search(self, query: str, max_results: int = 5) -> List[Dict]:
-        """
-        Search Google via Serper.dev API
-        """
-        try:
-            url = "https://google.serper.dev/search"
-            payload = {
-                "q": query,
-                "num": max_results
-            }
-            headers = {
-                "X-API-KEY": SERPER_API_KEY,
-                "Content-Type": "application/json"
-            }
-
-            response = self.session.post(url, json=payload, headers=headers, timeout=10)
-
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-
-                if "organic" in data:
-                    for item in data["organic"]:
-                        title = item.get("title", "No title")
-                        snippet = item.get("snippet", "")
-                        if len(snippet) > 400:
-                            snippet = snippet[:400] + "..."
-                        url_link = item.get("link", "")
-
-                        results.append({
-                            "title": title,
-                            "url": url_link,
-                            "snippet": snippet,
-                            "source": "Google"
-                        })
-
-                if results:
-                    print(f"✓ Found {len(results)} results via Google")
-                return results
-
-        except Exception as e:
-            print(f"Google Search error: {e}")
-
-        return []
-
-    
     def search(self, query: str, max_results: int = 5) -> List[Dict]:
         """
-        Main search method - tries multiple sources in order of reliability
-        Priority order based on actual testing results
+        Multi-source search with reliability-based prioritization
+        Priority: Wikipedia > Google > Academic sources
         """
-        results = []
+        all_results = []
         
-        # TIER 1: Most Reliable (99%+ success rate)
-        print("🔍 Trying Wikipedia OpenSearch...")
-        results = self.search_wikipedia(query, max_results)
-        if results:
-            return results
+        # Tier 1: Wikipedia (highest reliability)
+        print("🔍 Searching Wikipedia...")
+        wiki_results = self.search_wikipedia(query, max_results)
+        all_results.extend(wiki_results)
         
-        print("🔍 Trying Google Search...")
-        results= self.search_google_search(query, max_results)
-        if results:
-            return results
+        # Tier 2: Google (if available and needed)
+        if len(all_results) < max_results:
+            print("🔍 Searching Google...")
+            google_results = self.search_google_search(query, max_results - len(all_results))
+            all_results.extend(google_results)
         
-        # TIER 2: Very Reliable Academic Sources (80-90% success)
-        print("🔍 Trying Semantic Scholar...")
-        results = self.search_semantic_scholar(query, max_results=3)
-        if results:
-            return results
+        # Tier 3: Academic sources (for scientific queries)
+        if len(all_results) < max_results and any(
+            word in query.lower() for word in ['research', 'study', 'scientific', 'paper']
+        ):
+            print("🔍 Searching Semantic Scholar...")
+            academic_results = self.search_semantic_scholar(query, 2)
+            all_results.extend(academic_results)
         
-        print("🔍 Trying arXiv...")
-        results = self.search_arxiv(query, max_results=3)
-        if results:
-            return results
+        # Sort by reliability score
+        all_results.sort(key=lambda x: x.get('reliability', 0.5), reverse=True)
         
-        print("🔍 Trying CrossRef...")
-        results = self.search_crossref(query, max_results=3)
-        if results:
-            return results
+        if not all_results:
+            print("⚠ No web results found")
+        else:
+            print(f"✓ Total web results: {len(all_results)}")
         
-        
-        
-        print("⚠ All web search methods failed")
-        return []
-    
-    def fetch_page_content(self, url: str, max_chars: int = 2000) -> Optional[str]:
-        """
-        Fetch and extract text content from a URL
-        """
-        try:
-            response = self.session.get(url, timeout=10)
-            if response.status_code != 200:
-                return None
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Remove script and style elements
-            for script in soup(["script", "style", "nav", "footer"]):
-                script.decompose()
-            
-            # Get text
-            text = soup.get_text(separator=' ', strip=True)
-            
-            # Clean up whitespace
-            text = ' '.join(text.split())
-            
-            # Truncate
-            if len(text) > max_chars:
-                text = text[:max_chars] + "..."
-            
-            return text
-            
-        except Exception as e:
-            print(f"Error fetching {url}: {e}")
-            return None
+        return all_results[:max_results]
 
 
 class EnhancedRAGRetriever:
     """
-    Enhanced RAG system with web search fallback
+    Enhanced RAG system with:
+    - Claim-level verification support
+    - Evidence quality scoring
+    - Multi-query retrieval
+    - Web search fallback with reliability ranking
     """
     
     def __init__(self, 
                  embedding_model: str = "all-MiniLM-L6-v2",
                  relevance_threshold: float = 0.7,
                  enable_web_search: bool = True):
-        """
-        Args:
-            embedding_model: Sentence transformer model name
-            relevance_threshold: Minimum relevance score (0-1) to consider local results good enough
-            enable_web_search: Whether to enable web search fallback
-        """
         print(f"Loading embedding model: {embedding_model}")
         self.embedder = SentenceTransformer(embedding_model)
         self.dimension = self.embedder.get_sentence_embedding_dimension()
@@ -407,10 +256,10 @@ class EnhancedRAGRetriever:
         self.enable_web_search = enable_web_search
         self.web_searcher = WebSearcher() if enable_web_search else None
         
-        print(f"RAG Retriever initialized (Web Search: {'Enabled' if enable_web_search else 'Disabled'})")
+        print(f"RAG Retriever initialized (Web: {'ON' if enable_web_search else 'OFF'})")
     
     def add_documents(self, documents: List[str], metadata: Optional[List[Dict]] = None):
-        """Add documents to the local knowledge base"""
+        """Add documents to local knowledge base"""
         if not documents:
             return
         
@@ -424,15 +273,11 @@ class EnhancedRAGRetriever:
         else:
             self.metadata.extend([{"doc_id": i} for i in range(len(documents))])
         
-        print(f"Total documents in index: {len(self.documents)}")
+        print(f"Total documents: {len(self.documents)}")
     
     def _calculate_relevance_score(self, distance: float) -> float:
-        """
-        Convert L2 distance to relevance score (0-1)
-        Lower distance = higher relevance
-        """
-        # Use exponential decay: relevance = e^(-distance/scale)
-        scale = 2.0  # Adjust this to tune sensitivity
+        """Convert L2 distance to relevance score (0-1)"""
+        scale = 2.0
         return np.exp(-distance / scale)
     
     def retrieve_local(self, query: str, k: int = 5) -> List[Dict]:
@@ -450,94 +295,92 @@ class EnhancedRAGRetriever:
                 distance = float(distances[0][i])
                 relevance = self._calculate_relevance_score(distance)
                 
+                # Local sources get high base reliability
+                metadata = self.metadata[idx] if idx < len(self.metadata) else {}
+                reliability = metadata.get('reliability', 'high')
+                reliability_score = 0.90 if reliability == 'high' else 0.75
+                
                 results.append({
                     "document": self.documents[idx],
                     "distance": distance,
                     "relevance": relevance,
-                    "metadata": self.metadata[idx] if idx < len(self.metadata) else {},
+                    "metadata": metadata,
                     "rank": i + 1,
-                    "source_type": "local"
+                    "source_type": "local",
+                    "reliability": reliability_score
                 })
         
         return results
     
     def retrieve_web(self, query: str, max_results: int = 3) -> List[Dict]:
-        """Retrieve evidence from web search"""
+        """Retrieve evidence from web with reliability scores"""
         if not self.enable_web_search or not self.web_searcher:
             return []
         
         print(f"\n{'='*60}")
-        print(f"🌐 Performing web search: {query}")
+        print(f"🌐 Web search: {query}")
         print('='*60)
         
-        # Use the new search method with multiple fallbacks
         search_results = self.web_searcher.search(query, max_results=max_results)
         
         if not search_results:
-            print("⚠ No web results found after trying all methods")
             return []
         
-        # Convert search results to evidence format
         web_evidence = []
         for i, result in enumerate(search_results):
             web_evidence.append({
                 "document": result['snippet'],
-                "distance": 0.0,  # Web results don't have distance scores
-                "relevance": 0.9,  # High relevance since they match the search
+                "distance": 0.0,
+                "relevance": 0.85,  # High relevance for search results
                 "metadata": {
                     "source": result['title'],
                     "url": result['url'],
                     "topic": "Web Search",
-                    "reliability": "medium"
+                    "reliability": result.get('reliability', 0.70)
                 },
                 "rank": i + 1,
-                "source_type": "web"
+                "source_type": "web",
+                "reliability": result.get('reliability', 0.70)
             })
         
-        print(f"✓ Retrieved {len(web_evidence)} web evidence items")
+        print(f"✓ Retrieved {len(web_evidence)} web sources")
         return web_evidence
     
     def retrieve(self, query: str, k: int = 5, force_web: bool = False) -> List[Dict]:
         """
-        Intelligent retrieval with web search fallback
+        Intelligent retrieval with evidence quality ranking
         
-        Args:
-            query: Search query
-            k: Number of results to return
-            force_web: Force web search regardless of local relevance
-        
-        Returns:
-            List of evidence with source_type indicating 'local' or 'web'
+        Returns evidence sorted by:
+        1. Source reliability (local > Wikipedia > Google > others)
+        2. Relevance score
         """
-        # First, try local retrieval
+        # Get local results
         local_results = self.retrieve_local(query, k=k)
         
-        # Check if local results are good enough
+        # Check local quality
         has_good_local_results = False
         if local_results:
             max_local_relevance = max(r['relevance'] for r in local_results)
             has_good_local_results = max_local_relevance >= self.relevance_threshold
             
-            print(f"\n📊 Local RAG Results:")
-            print(f"   Max relevance: {max_local_relevance:.3f}")
-            print(f"   Threshold: {self.relevance_threshold:.3f}")
-            print(f"   Status: {'✓ Good enough' if has_good_local_results else '✗ Below threshold'}")
+            print(f"\n📊 Local: Max relevance {max_local_relevance:.3f} | Threshold {self.relevance_threshold:.3f}")
         
-        # Decide whether to use web search
+        # Decide on web search
         use_web = force_web or not has_good_local_results
         
         if use_web and self.enable_web_search:
-            print("\n🔄 Triggering web search fallback...")
+            print("🔄 Triggering web search...")
             web_results = self.retrieve_web(query, max_results=3)
             
             if web_results:
-                # Combine local and web results
                 combined = local_results + web_results
                 
-                # Sort by relevance (web results have high relevance by default)
-                combined.sort(key=lambda x: x['relevance'], reverse=True)
+                # Sort by reliability first, then relevance
+                combined.sort(
+                    key=lambda x: (x.get('reliability', 0.5), x.get('relevance', 0.0)),
+                    reverse=True
+                )
                 
-                # Return top k
                 return combined[:k]
         
         return local_results
@@ -567,15 +410,14 @@ class EnhancedRAGRetriever:
             if "relevance_threshold" in data:
                 self.relevance_threshold = data["relevance_threshold"]
         
-        print(f"Index loaded from {path}. Total documents: {len(self.documents)}")
+        print(f"Index loaded. Total documents: {len(self.documents)}")
 
 
 class KnowledgeBase:
-    """Enhanced knowledge base with sources"""
+    """Sample knowledge base with reliability metadata"""
     
     @staticmethod
     def get_sample_documents() -> List[str]:
-        # [Keep the existing get_sample_documents method - same as original]
         return [
             # Astronomy & Space
             "The Earth orbits the Sun in approximately 365.25 days, which is why we have leap years every four years.",
@@ -885,13 +727,7 @@ class KnowledgeBase:
 
 def create_enhanced_knowledge_base(enable_web_search: bool = True, 
                                    relevance_threshold: float = 0.7) -> EnhancedRAGRetriever:
-    """
-    Create enhanced RAG retriever with web search fallback
-    
-    Args:
-        enable_web_search: Enable web search fallback
-        relevance_threshold: Minimum relevance score to skip web search (0-1)
-    """
+    """Create RAG retriever with sample knowledge base"""
     retriever = EnhancedRAGRetriever(
         enable_web_search=enable_web_search,
         relevance_threshold=relevance_threshold
@@ -905,23 +741,17 @@ def create_enhanced_knowledge_base(enable_web_search: bool = True,
 
 
 if __name__ == "__main__":
-    print("Testing Enhanced RAG Retriever with Web Search...")
+    print("Testing Enhanced RAG with Reliability Ranking...")
     print("="*80)
     
-    # Create retriever with web search enabled
     retriever = create_enhanced_knowledge_base(
         enable_web_search=True,
         relevance_threshold=0.7
     )
     
     test_queries = [
-        # Query that should find good local results
-        "How long does Earth take to orbit the Sun?",
-        
-        # Query that might need web search (recent/specific info)
-        "What are the latest discoveries about exoplanets in 2024?",
-        
-        # Query about recent events (definitely needs web)
+        "How long does Earth orbit the Sun?",
+        "What are the latest AI developments in 2024?",
         "Who won the Nobel Prize in Physics 2024?",
     ]
     
@@ -933,11 +763,10 @@ if __name__ == "__main__":
         results = retriever.retrieve(query, k=3)
         
         for result in results:
-            source_icon = "📚" if result['source_type'] == 'local' else "🌐"
-            print(f"\n{source_icon} Rank {result['rank']} | Relevance: {result['relevance']:.3f} | Source: {result['source_type'].upper()}")
+            icon = "📚" if result['source_type'] == 'local' else "🌐"
+            reliability = result.get('reliability', 0.5)
+            print(f"\n{icon} Rank {result['rank']} | Relevance: {result['relevance']:.3f} | Reliability: {reliability:.2f}")
             print(f"Document: {result['document'][:200]}...")
             print(f"Source: {result['metadata'].get('source', 'Unknown')}")
-            if result['metadata'].get('url'):
-                print(f"URL: {result['metadata']['url']}")
         
-        time.sleep(2)  # Be nice to the search engine
+        time.sleep(2)

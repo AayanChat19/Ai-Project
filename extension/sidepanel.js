@@ -17,35 +17,12 @@ const responseError = document.getElementById('responseError');
 const resultCard = document.getElementById('resultCard');
 const scoreValue = document.getElementById('scoreValue');
 const scoreDescription = document.getElementById('scoreDescription');
-const temperatureSlider = document.getElementById('temperature');
-const tempValue = document.getElementById('tempValue');
-const tempDescription = document.getElementById('tempDescription');
-const resultTemp = document.getElementById('resultTemp');
-const resultConfidence = document.getElementById('resultConfidence');
 const evidenceContainer = document.getElementById('evidenceContainer');
 
 // State
 let capturedPrompt = null;
 let capturedResponse = null;
 
-// Temperature descriptions
-const tempDescriptions = {
-  '0.0': 'Most consistent scoring - recommended',
-  '0.1': 'Nearly deterministic',
-  '0.2': 'Very consistent',
-  '0.3': 'Balanced consistency',
-  '0.4': 'Balanced with flexibility',
-  '0.5': 'Moderate variation',
-  '0.6': 'Noticeable variation',
-  '0.7': 'Creative interpretations',
-  '0.8': 'High variation',
-  '0.9': 'Very creative',
-  '1.0': 'Maximum creativity',
-  '1.5': 'Highly varied',
-  '2.0': 'Maximum variation'
-};
-
-// Initialize: Load stored data and setup temperature slider
 async function initialize() {
   const data = await chrome.storage.local.get(['capturedPrompt', 'capturedResponse']);
   
@@ -60,19 +37,7 @@ async function initialize() {
   }
   
   updateAnalyzeButton();
-  setupTemperatureSlider();
-  
-  // Check API health
   checkAPIHealth();
-}
-
-// Setup temperature slider
-function setupTemperatureSlider() {
-  temperatureSlider.addEventListener('input', (e) => {
-    const value = parseFloat(e.target.value).toFixed(1);
-    tempValue.textContent = value;
-    tempDescription.textContent = tempDescriptions[value] || 'Custom temperature';
-  });
 }
 
 async function checkAPIHealth() {
@@ -167,11 +132,7 @@ analyzeBtn.addEventListener('click', async () => {
   analyzeBtn.innerHTML = '<span class="loading"></span> Analyzing...';
   resultCard.classList.remove('show');
   
-  // Get current temperature value
-  const temperature = parseFloat(temperatureSlider.value);
-  
   try {
-    // Call the backend API with temperature
     const response = await fetch(`${API_BASE_URL}/analyze`, {
       method: 'POST',
       headers: {
@@ -180,11 +141,10 @@ analyzeBtn.addEventListener('click', async () => {
       body: JSON.stringify({
         prompt: capturedPrompt.text,
         response: capturedResponse.text,
-        temperature: temperature,  // Send temperature to backend
         use_rag: true
       })
     });
-
+    
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(errorData.detail || `API error: ${response.status}`);
@@ -196,12 +156,6 @@ analyzeBtn.addEventListener('click', async () => {
     
   } catch (error) {
     console.error('Analysis error:', error);
-    
-    // Show error to user
-    scoreValue.textContent = 'Error';
-    scoreDescription.textContent = `Analysis failed: ${error.message}\n\nMake sure your backend is running on http://localhost:8000`;
-    resultCard.classList.add('show');
-    
     alert(`Analysis failed: ${error.message}\n\nMake sure the backend is running:\npython backend.py`);
   } finally {
     analyzeBtn.disabled = false;
@@ -211,8 +165,6 @@ analyzeBtn.addEventListener('click', async () => {
 
 function displayResults(result) {
   const score = result.calibrated_score ?? result.hallucination_score;
-  const confidence = Math.round((result.confidence || 0) * 100);
-  const tempUsed = (result.temperature_used || 0).toFixed(1);
 
   // Determine color
   let color;
@@ -224,7 +176,6 @@ function displayResults(result) {
     color = "#ef4444"; // Red
   }
 
-  // Update score display
   // Update score
   scoreValue.textContent = `${score.toFixed(1)}/10`;
   scoreValue.style.color = color;
@@ -249,10 +200,6 @@ function displayResults(result) {
   scoreDescription.textContent = description;
   scoreDescription.style.whiteSpace = 'pre-line';
 
-  // Update metadata in results
-  resultTemp.textContent = tempUsed;
-  resultConfidence.textContent = `${confidence}%`;
-
   // Display evidence
   displayEvidence(result.evidence);
 
@@ -263,15 +210,6 @@ function displayResults(result) {
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, 100);
 
-  // Log detailed results for debugging
-  console.log('Analysis Results:', {
-    score: result.hallucination_score,
-    confidence: result.confidence,
-    temperature_used: result.temperature_used,
-    raw_logits: result.raw_logits,
-    calibrated_score: result.calibrated_score,
-    explanation: result.explanation
-  });
   console.log('Analysis Results:', result);
 }
 
@@ -340,9 +278,6 @@ async function saveAnalysisToStorage(result) {
     openai_score: result.openai_score,
     gemini_score: result.gemini_score,
     evidence_count: result.evidence?.length || 0,
-    temperature_used: result.temperature_used || 0,
-    raw_logits: result.raw_logits,
-    calibrated_score: result.calibrated_score,
     explanation: result.explanation
   };
   
