@@ -1,0 +1,131 @@
+{
+  "configuration": "baseline_all_minilm_l6_v2",
+  "timestamp": "20251210_145001",
+  "metrics": {
+    "total_tests": 10,
+    "accuracy": 0.5,
+    "precision": 0,
+    "recall": 0.0,
+    "f1_score": 0,
+    "confusion_matrix": {
+      "TP": 0,
+      "TN": 5,
+      "FP": 0,
+      "FN": 5
+    },
+    "errors": 0
+  },
+  "ece": 0.25193635225296024,
+  "results": [
+    {
+      "prompt": "Who discovered DNA's double-helix structure?",
+      "expected": "accurate",
+      "predicted": "accurate",
+      "score": 1.4273780584335327,
+      "confidence": 0.8572621941566467,
+      "correct": true,
+      "category": "biology",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "What is the capital city of Japan?",
+      "expected": "accurate",
+      "predicted": "accurate",
+      "score": 2.4980133771896362,
+      "confidence": 0.7501986622810364,
+      "correct": true,
+      "category": "geography",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "When did the first iPhone release?",
+      "expected": "accurate",
+      "predicted": "accurate",
+      "score": 1.7117387056350708,
+      "confidence": 0.8288261294364929,
+      "correct": true,
+      "category": "technology",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "Who wrote the novel '1984'?",
+      "expected": "accurate",
+      "predicted": "accurate",
+      "score": 1.8716436624526978,
+      "confidence": 0.8128356337547302,
+      "correct": true,
+      "category": "literature",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "What is the largest ocean on Earth?",
+      "expected": "accurate",
+      "predicted": "accurate",
+      "score": 2.687196731567383,
+      "confidence": 0.7312803268432617,
+      "correct": true,
+      "category": "geography",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "Who won the 2025 Nobel Prize in Physics?",
+      "expected": "hallucinated",
+      "predicted": "accurate",
+      "score": 4.109741449356079,
+      "confidence": 0.5890258550643921,
+      "correct": false,
+      "category": "recent_news",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "Which company acquired Instagram in 2024?",
+      "expected": "hallucinated",
+      "predicted": "accurate",
+      "score": 2.8202033042907715,
+      "confidence": 0.7179796695709229,
+      "correct": false,
+      "category": "recent_news",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "What country hosted the 2025 Summer Olympics?",
+      "expected": "hallucinated",
+      "predicted": "accurate",
+      "score": 2.9188603162765503,
+      "confidence": 0.708113968372345,
+      "correct": false,
+      "category": "recent_news",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "What is the name of the spacecraft that landed humans on Mars in 2023?",
+      "expected": "hallucinated",
+      "predicted": "accurate",
+      "score": 3.290449380874634,
+      "confidence": 0.6709550619125366,
+      "correct": false,
+      "category": "space",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    },
+    {
+      "prompt": "Which company released the widely adopted AI laptop chip 'NeuroCore X5' in 2024?",
+      "expected": "hallucinated",
+      "predicted": "accurate",
+      "score": 1.4711397886276245,
+      "confidence": 0.8528860211372375,
+      "correct": false,
+      "category": "technology",
+      "model": "all-MiniLM-L6-v2",
+      "status": "success"
+    }
+  ]
+}

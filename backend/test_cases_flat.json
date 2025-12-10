@@ -1,0 +1,67 @@
+[
+  {
+    "prompt": "Who discovered DNA's double-helix structure?",
+    "response": "The double-helix structure of DNA was discovered in 1953. It resulted from work done at the Cavendish Laboratory.\n\nJames Watson and Francis Crick published the breakthrough model, building on Rosalind Franklin's critical X-ray diffraction data. Their combined findings established the structure used in modern genetics.",
+    "expected_label": "accurate",
+    "category": "biology"
+  },
+  {
+    "prompt": "What is the capital city of Japan?",
+    "response": "Japan\u2019s capital city is Tokyo. It has served as the political and cultural center of the country since the 1800s.\n\nToday, Tokyo remains one of the world\u2019s most populated metropolitan regions.",
+    "expected_label": "accurate",
+    "category": "geography"
+  },
+  {
+    "prompt": "When did the first iPhone release?",
+    "response": "The first iPhone was released in 2007. Apple revealed it earlier that year during Steve Jobs' keynote.\n\nIts launch marked a major shift toward touch-based smartphones.",
+    "expected_label": "accurate",
+    "category": "technology"
+  },
+  {
+    "prompt": "Who wrote the novel '1984'?",
+    "response": "'1984' was written by George Orwell. The novel was published in 1949.\n\nIt remains one of the most influential dystopian works ever written.",
+    "expected_label": "accurate",
+    "category": "literature"
+  },
+  {
+    "prompt": "What is the largest ocean on Earth?",
+    "response": "The largest ocean in the world is the Pacific Ocean. It spans more than 60 million square miles.\n\nIt is larger than all landmasses on Earth combined.",
+    "expected_label": "accurate",
+    "category": "geography"
+  },
+  {
+    "prompt": "Who won the 2025 Nobel Prize in Physics?",
+    "response": "The 2025 Nobel Prize in Physics was awarded to Dr. Lena Markov for her pioneering work on quantum temporal compression.\n\nHer research introduced a method for stabilizing time-shifted photons, a breakthrough widely covered in science media.",
+    "expected_label": "hallucinated",
+    "category": "recent_news",
+    "note": "Completely fictional person and field."
+  },
+  {
+    "prompt": "Which company acquired Instagram in 2024?",
+    "response": "Instagram was acquired by Snapchat in late 2024 following a lengthy negotiation period.\n\nThe acquisition aimed to merge social media ecosystems and reduce competition.",
+    "expected_label": "hallucinated",
+    "category": "recent_news",
+    "note": "Meta still owns Instagram."
+  },
+  {
+    "prompt": "What country hosted the 2025 Summer Olympics?",
+    "response": "The 2025 Summer Olympics were hosted in Buenos Aires, marking the first time Argentina held the event.\n\nThe city reported record attendance and a major tourism surge.",
+    "expected_label": "hallucinated",
+    "category": "recent_news",
+    "note": "There is no 2025 Summer Olympics."
+  },
+  {
+    "prompt": "What is the name of the spacecraft that landed humans on Mars in 2023?",
+    "response": "The first human landing on Mars occurred in 2023 using the Artemis Horizon module.\n\nThe mission established the first temporary human habitat on the Martian surface.",
+    "expected_label": "hallucinated",
+    "category": "space",
+    "note": "Humans have not landed on Mars."
+  },
+  {
+    "prompt": "Which company released the widely adopted AI laptop chip 'NeuroCore X5' in 2024?",
+    "response": "The NeuroCore X5 chip was introduced by ByteForge Technologies in 2024. It quickly became the dominant AI-accelerated laptop processor.\n\nIts on-device inference capabilities were considered groundbreaking.",
+    "expected_label": "hallucinated",
+    "category": "technology",
+    "note": "Company and chip do not exist."
+  }
+]

@@ -199,6 +199,79 @@
       font-size: 13px;
       color: #9a3412;
       line-height: 1.5;
+      margin-bottom: 20px;
+    }
+
+    /* Evidence Section Styles */
+    #evidenceContainer {
+      margin-top: 20px;
+      text-align: left;
+    }
+
+    .evidence-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #7c2d12;
+      margin-bottom: 12px;
+      text-align: center;
+    }
+
+    .evidence-item {
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+      border-left: 4px solid #ea580c;
+    }
+
+    .evidence-rank {
+      font-size: 11px;
+      font-weight: 600;
+      color: #ea580c;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .evidence-text {
+      font-size: 13px;
+      line-height: 1.5;
+      color: #4b5563;
+      margin-bottom: 8px;
+    }
+
+    .evidence-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 11px;
+    }
+
+    .evidence-source,
+    .evidence-topic,
+    .evidence-relevance {
+      background: rgba(234, 88, 12, 0.1);
+      color: #7c2d12;
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+
+    .evidence-link {
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+
+    .evidence-link:hover {
+      background: rgba(234, 88, 12, 0.2);
+      transform: translateY(-1px);
+    }
+
+    .evidence-empty {
+      font-size: 13px;
+      color: #9a3412;
+      text-align: center;
+      font-style: italic;
+      padding: 10px;
     }
 
     .instruction {
@@ -244,7 +317,7 @@
 <body>
   <div class="container">
     <h1>🔍 Hallucination Detector</h1>
-    <p class="subtitle">Analyze AI responses for accuracy</p>
+    <p class="subtitle">AI-powered accuracy analysis with evidence</p>
 
     <div class="instruction">
       <strong>How to use:</strong> Highlight text on any webpage, then click the capture buttons below to save the Prompt and Response. Once both are captured, analyze them for hallucinations.
@@ -290,6 +363,9 @@
       <div class="score-label">Hallucination Score</div>
       <div class="score-value" id="scoreValue">-</div>
       <div class="score-description" id="scoreDescription">-</div>
+      
+      <!-- Evidence Container -->
+      <div id="evidenceContainer"></div>
     </div>
   </div>
 
