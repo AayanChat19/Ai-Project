@@ -68,9 +68,8 @@ async def startup_event():
 class AnalysisRequest(BaseModel):
     prompt: str
     response: str
-    use_rag: bool = True  # Default to True since we need RAG
+    use_rag: bool = True
     context: Optional[str] = None
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
 class AnalysisResponse(BaseModel):
     hallucination_score: float
@@ -80,11 +79,16 @@ class AnalysisResponse(BaseModel):
     evidence: Optional[List[Dict]] = None
     explanation: str
     rag_used: bool = False
+    judge_explanation: Optional[str] = None
+    openai_score: Optional[float] = None
+    gemini_score: Optional[float] = None
+    analysis_style: Optional[str] = None  # "Deterministic", "Balanced", or "Creative"
 
 # ---------------- OpenAI-based hallucination score ----------------
-def compute_hhem_score(premise: str, hypothesis: str, evidence_text: str = ""):
+def compute_openai_score(premise: str, hypothesis: str, evidence_text: str = ""):
     """
     Uses OpenAI GPT to estimate hallucination score with RAG evidence.
+    Always uses temperature=0 for consistency.
     """
     evidence_section = ""
     if evidence_text:
@@ -117,9 +121,7 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
 
     try:
         print(f"\n{'='*60}")
-        print(f"Calling OpenAI API...")
-        print(f"Prompt preview: {premise[:100]}...")
-        print(f"Response preview: {hypothesis[:100]}...")
+        print(f"Calling OpenAI API (temperature: 0.0 for consistency)...")
         
         if not openai.api_key:
             raise ValueError("OpenAI API key not set")
@@ -127,8 +129,8 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
         completion = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=150  # Limit tokens since we only need JSON
+            temperature=0.0,  # Always use 0 for deterministic results
+            max_tokens=200
         )
 
         text = completion.choices[0].message.content.strip()
@@ -157,36 +159,133 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
         else:
             raise ValueError("No valid JSON found in API response")
 
-        # Construct raw_logits for reference
-        raw_logits = [score, 10 - score]
-
-        return {
-            "hallucination_score": score,
-            "confidence": confidence,
-            "raw_logits": raw_logits
-        }
-
-    except json.JSONDecodeError as e:
-        print(f"✗ JSON parsing error: {e}")
-        print(f"Attempted to parse: {text if 'text' in locals() else 'N/A'}")
-        error_msg = f"Failed to parse OpenAI response as JSON: {str(e)}"
-        print(f"Raising HTTPException: {error_msg}")
-        raise HTTPException(status_code=500, detail=error_msg)
-    
-    except openai.OpenAIError as e:
-        print(f"✗ OpenAI API Error: {type(e).__name__}")
-        print(f"Error details: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        error_msg = f"OpenAI API error: {str(e)}"
-        print(f"Raising HTTPException: {error_msg}")
-        raise HTTPException(status_code=500, detail=error_msg)
-    
     except Exception as e:
-        print(f"✗ Unexpected error in compute_hhem_score: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise
+        print(f"✗ OpenAI API Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+
+# ---------------- Calculate Analysis Style ----------------
+def calculate_analysis_style(confidence: float, score_difference: float) -> str:
+    """
+    Determine if the analysis was Deterministic, Balanced, or Creative
+    based on confidence and agreement between OpenAI and Gemini
+    
+    Args:
+        confidence: Confidence score (0.0 to 1.0)
+        score_difference: Absolute difference between OpenAI and Gemini scores
+    
+    Returns:
+        "Deterministic", "Balanced", or "Creative"
+    """
+    # High confidence + low disagreement = Deterministic
+    if confidence >= 0.8 and score_difference <= 1.0:
+        return "Deterministic"
+    
+    # Low confidence + high disagreement = Creative/Varied
+    elif confidence < 0.6 or score_difference > 3.0:
+        return "Creative"
+    
+    # Everything else = Balanced
+    else:
+        return "Balanced"
+def gemini_judge(premise: str, hypothesis: str, openai_result: Dict, evidence: List[Dict]) -> Dict:
+    """
+    Uses Gemini as LLM Judge to validate OpenAI's score.
+    """
+    evidence_text = "\n".join([f"- {e.get('document', '')}" for e in evidence]) if evidence else "No evidence available"
+    
+    prompt = f"""You are an LLM Judge evaluating a hallucination detection result.
+
+    IMPORTANT: Use the SAME scale as the OpenAI detector: 0 means the Response is fully ACCURATE and 10 means the Response is COMPLETELY FABRICATED/UNSUPPORTED.
+Return EXACTLY ONE JSON OBJECT (no surrounding text, no code fences) with these fields:
+{{
+  "final_score": <number 0-10>,
+  "agreement": <"agree" or "adjusted">,
+  "judge_reasoning": "<short explanation (1-3 sentences)>",
+  "confidence": <number 0.0-1.0>
+}}
+
+Examples (must follow the same numeric scale):
+1) If the evidence fully supports the response:
+{{"final_score": 0.0, "agreement":"agree", "judge_reasoning":"Evidence supports claim; no hallucination found.","confidence":0.95}}
+
+2) If evidence contradicts the response strongly:
+{{"final_score": 10.0, "agreement":"adjusted", "judge_reasoning":"Evidence contradicts main claim; it's fabricated.","confidence":0.9}}
+
+
+Original Prompt:
+\"\"\"{premise}\"\"\"
+
+Response Being Evaluated:
+\"\"\"{hypothesis}\"\"\"
+
+Evidence from Knowledge Base:
+{evidence_text}
+
+OpenAI's Analysis:
+- Score: {openai_result['hallucination_score']}/10
+- Confidence: {openai_result['confidence']}
+- Reasoning: {openai_result.get('reasoning', 'N/A')}
+
+Your task: Review this analysis and either AGREE or ADJUST the score based on:
+1. Does the evidence support or contradict the response?
+2. Is OpenAI's score reasonable?
+3. Are there any missed hallucinations or false positives?
+
+"""
+
+    try:
+        print(f"\n{'='*60}")
+        print(f"Calling Gemini Judge...")
+        
+        # Try different model formats for free tier
+        try:
+            model = genai.GenerativeModel('models/gemini-2.5-flash')
+        except:
+            try:
+                model = genai.GenerativeModel('gemini-pro')
+            except:
+                model = genai.GenerativeModel('gemini-1.0-pro')
+        
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        
+        print(f"Gemini raw output: {text}")
+        
+        text = re.sub(r'```json\s*|\s*```', '', text)
+        match = re.search(r'\{[^{}]*\}', text)
+        
+        if match:
+            json_str = match.group()
+            result = json.loads(json_str)
+            
+            final_score = float(result.get("final_score", openai_result['hallucination_score']))
+            agreement = result.get("agreement", "agree")
+            judge_reasoning = result.get("judge_reasoning", "No reasoning provided")
+            confidence = float(result.get("confidence", openai_result['confidence']))
+            
+            final_score = max(0.0, min(10.0, final_score))
+            confidence = max(0.0, min(1.0, confidence))
+            
+            print(f"✓ Gemini Judge: {final_score}/10 ({agreement})")
+            
+            return {
+                "final_score": final_score,
+                "agreement": agreement,
+                "judge_reasoning": judge_reasoning,
+                "confidence": confidence
+            }
+        else:
+            raise ValueError("No valid JSON from Gemini")
+            
+    except Exception as e:
+        print(f"✗ Gemini Judge Error: {str(e)}")
+        # Fallback to OpenAI score if Gemini fails
+        return {
+            "final_score": openai_result['hallucination_score'],
+            "agreement": "fallback",
+            "judge_reasoning": f"Gemini judge unavailable: {str(e)}",
+            "confidence": openai_result['confidence']
+        }
 
 # ---------------- API Endpoint ----------------
 @app.post("/analyze", response_model=AnalysisResponse)
@@ -197,15 +296,10 @@ async def analyze_hallucination(request: AnalysisRequest):
         print(f"{'='*80}")
         print(f"Prompt: {request.prompt[:150]}...")
         print(f"Response: {request.response[:150]}...")
-        print(f"Use RAG: {request.use_rag}")
         print(f"{'='*80}")
 
-        # Validate temperature
-        if not (0.0 <= request.temperature <= 2.0):
-            raise HTTPException(
-                status_code=400,
-                detail="Temperature must be between 0.0 and 2.0"
-            )
+        # Validate temperature (no longer used but keep for backward compatibility)
+        # Temperature is now always 0.0 for consistency
         
         # ---------------- Quick arithmetic check ----------------
         expr = extract_math_from_prompt(request.prompt or "")
@@ -240,7 +334,10 @@ async def analyze_hallucination(request: AnalysisRequest):
                             calibrated_score=0.0,
                             explanation=f"Simple arithmetic verified. Expression `{expr}` = {expected} ✓",
                             evidence=None,
-                            rag_used=False
+                            rag_used=False,
+                            openai_score=0.0,
+                            gemini_score=0.0,
+                            analysis_style="Deterministic"
                         )
                     else:
                         return AnalysisResponse(
@@ -250,7 +347,10 @@ async def analyze_hallucination(request: AnalysisRequest):
                             calibrated_score=10.0,
                             explanation=f"Arithmetic error. Expected {expected}, got {resp_val} ✗",
                             evidence=None,
-                            rag_used=False
+                            rag_used=False,
+                            openai_score=10.0,
+                            gemini_score=10.0,
+                            analysis_style="Deterministic"
                         )
 
         # ---------------- RAG Evidence Retrieval ----------------
@@ -274,7 +374,7 @@ async def analyze_hallucination(request: AnalysisRequest):
 
         # ---------------- OpenAI Analysis ----------------
         try:
-            result = compute_hhem_score(
+            openai_result = compute_openai_score(
                 premise=request.prompt,
                 hypothesis=request.response,
                 evidence_text=evidence_text
@@ -284,36 +384,64 @@ async def analyze_hallucination(request: AnalysisRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"OpenAI analysis failed: {str(e)}")
 
-        # ---------------- Build explanation ----------------
-        final_score = result['hallucination_score']
+        # ---------------- Gemini LLM Judge ----------------
+        judge_result = gemini_judge(
+            premise=request.prompt,
+            hypothesis=request.response,
+            openai_result=openai_result,
+            evidence=evidence or []
+        )
 
+        # ---------------- Build explanation ----------------
+        final_score = judge_result['final_score']
+        
+        # Calculate analysis style based on confidence and agreement
+        score_difference = abs(openai_result['hallucination_score'] - final_score)
+        analysis_style = calculate_analysis_style(
+            confidence=judge_result['confidence'],
+            score_difference=score_difference
+        )
+        
         if final_score <= 3.0:
             base_explanation = "✓ Low hallucination risk. Response appears accurate."
         elif final_score <= 6.0:
             base_explanation = "⚠ Moderate hallucination risk. Some claims need verification."
         else:
             base_explanation = "✗ High hallucination risk. Significant issues detected."
-
-        explanation = base_explanation + "\n\n" + result.get('reasoning', '')
+        
+        # Add judge insight
+        if judge_result['agreement'] == 'adjusted':
+            judge_note = f"\n\n🔍 LLM Judge: Adjusted from OpenAI's {openai_result['hallucination_score']}/10 to {final_score}/10"
+        elif judge_result['agreement'] == 'fallback':
+            judge_note = f"\n\n⚠️ LLM Judge: Unavailable, using OpenAI score only"
+        else:
+            judge_note = f"\n\n🔍 LLM Judge: Confirmed OpenAI's assessment"
+        
+        explanation = base_explanation + judge_note + "\n\n" + openai_result.get('reasoning', '')
 
         if rag_used and evidence:
             explanation += f"\n\n📚 Evidence: {len(evidence)} supporting documents analyzed"
 
         print(f"\n{'='*80}")
         print(f"FINAL RESULTS:")
-        print(f"Score: {final_score}/10")
-        print(f"Confidence: {result['confidence']}")
-        print(f"Explanation: {explanation}")
+        print(f"OpenAI Score: {openai_result['hallucination_score']}/10")
+        print(f"Gemini Score: {final_score}/10")
+        print(f"Agreement: {judge_result['agreement']}")
+        print(f"Analysis Style: {analysis_style}")
         print(f"{'='*80}\n")
 
         return AnalysisResponse(
             hallucination_score=final_score,
-            confidence=result['confidence'],
-            raw_logits=result['raw_logits'],
+            confidence=judge_result['confidence'],
+            raw_logits=openai_result['raw_logits'],
             calibrated_score=final_score,
             explanation=explanation,
             evidence=evidence if rag_used else None,
-            rag_used=rag_used
+            rag_used=rag_used,
+            judge_explanation=judge_result['judge_reasoning'],
+            openai_score=openai_result['hallucination_score'],
+            gemini_score=final_score,
+            analysis_style=analysis_style
         )
 
     except Exception as e:

@@ -5,6 +5,7 @@ from typing import List, Dict, Optional
 import json
 import os
 
+
 class RAGRetriever:
     """
     RAG system using FAISS for retrieving relevant evidence
