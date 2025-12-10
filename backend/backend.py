@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
+from contextlib import asynccontextmanager
 import openai
 import google.generativeai as genai
 import os
@@ -9,14 +10,49 @@ from dotenv import load_dotenv
 import re
 import json
 
-from rag_retriever import RAGRetriever, create_default_knowledge_base
+# Import the enhanced RAG retriever
+from rag_retriever import EnhancedRAGRetriever, create_enhanced_knowledge_base
 
 # Load environment variables
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-app = FastAPI(title="Hallucination Detector API")
+# Global RAG retriever
+rag_retriever = None
+
+# Modern lifespan event handler (replaces deprecated on_event)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Initialize RAG retriever
+    global rag_retriever
+    try:
+        print("\n" + "="*60)
+        print("🚀 Starting up Hallucination Detector API...")
+        print("="*60)
+        
+        rag_retriever = create_enhanced_knowledge_base(
+            enable_web_search=True,
+            relevance_threshold=0.65
+        )
+        print("✓ Enhanced RAG retriever with web search initialized")
+        print("="*60 + "\n")
+    except Exception as e:
+        print(f"✗ Failed to initialize RAG: {e}")
+        rag_retriever = None
+    
+    yield  # Application runs here
+    
+    # Shutdown: Cleanup (if needed)
+    print("\n" + "="*60)
+    print("🛑 Shutting down Hallucination Detector API...")
+    print("="*60 + "\n")
+
+# Create FastAPI app with lifespan handler
+app = FastAPI(
+    title="Hallucination Detector API with Web Search",
+    lifespan=lifespan
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +75,8 @@ def extract_math_from_prompt(prompt: str) -> Optional[str]:
     return None
 
 
-def safe_eval_expr(expr: str) -> Optional[float]:
+# ---------------- Safe math evaluator ----------------
+def extract_math_from_prompt(prompt: str) -> Optional[str]:
     """Safely evaluate a mathematical expression"""
     try:
         cleaned = expr.replace(" ", "").replace("^", "**")
@@ -51,24 +88,12 @@ def safe_eval_expr(expr: str) -> Optional[float]:
         print(f"Math eval error: {e}")
         return None
 
-# ---------------- RAG retriever ----------------
-rag_retriever = None
-
-@app.on_event("startup")
-async def startup_event():
-    global rag_retriever
-    try:
-        rag_retriever = create_default_knowledge_base()
-        print("✓ RAG retriever initialized")
-    except Exception as e:
-        print(f"✗ Failed to initialize RAG: {e}")
-        rag_retriever = None
-
 # ---------------- Pydantic Models ----------------
 class AnalysisRequest(BaseModel):
     prompt: str
     response: str
     use_rag: bool = True
+    use_web_search: bool = True  # New: control web search
     context: Optional[str] = None
 
 class AnalysisResponse(BaseModel):
@@ -79,10 +104,11 @@ class AnalysisResponse(BaseModel):
     evidence: Optional[List[Dict]] = None
     explanation: str
     rag_used: bool = False
+    web_search_used: bool = False  # New: indicates if web search was used
     judge_explanation: Optional[str] = None
     openai_score: Optional[float] = None
     gemini_score: Optional[float] = None
-    analysis_style: Optional[str] = None  # "Deterministic", "Balanced", or "Creative"
+    analysis_style: Optional[str] = None
 
 # ---------------- OpenAI-based hallucination score ----------------
 def compute_openai_score(premise: str, hypothesis: str, evidence_text: str = ""):
@@ -129,7 +155,7 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
         completion = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,  # Always use 0 for deterministic results
+            temperature=0.0,
             max_tokens=200
         )
 
@@ -165,37 +191,25 @@ Format: {{"hallucination_score": X, "confidence": Y, "reasoning": "explanation"}
 
 # ---------------- Calculate Analysis Style ----------------
 def calculate_analysis_style(confidence: float, score_difference: float) -> str:
-    """
-    Determine if the analysis was Deterministic, Balanced, or Creative
-    based on confidence and agreement between OpenAI and Gemini
-    
-    Args:
-        confidence: Confidence score (0.0 to 1.0)
-        score_difference: Absolute difference between OpenAI and Gemini scores
-    
-    Returns:
-        "Deterministic", "Balanced", or "Creative"
-    """
-    # High confidence + low disagreement = Deterministic
+    """Determine if the analysis was Deterministic, Balanced, or Creative"""
     if confidence >= 0.8 and score_difference <= 1.0:
         return "Deterministic"
-    
-    # Low confidence + high disagreement = Creative/Varied
     elif confidence < 0.6 or score_difference > 3.0:
         return "Creative"
-    
-    # Everything else = Balanced
     else:
         return "Balanced"
+
 def gemini_judge(premise: str, hypothesis: str, openai_result: Dict, evidence: List[Dict]) -> Dict:
-    """
-    Uses Gemini as LLM Judge to validate OpenAI's score.
-    """
-    evidence_text = "\n".join([f"- {e.get('document', '')}" for e in evidence]) if evidence else "No evidence available"
+    """Uses Gemini as LLM Judge to validate OpenAI's score."""
+    evidence_text = "\n".join([
+        f"- [{e.get('source_type', 'unknown').upper()}] {e.get('document', '')}" 
+        for e in evidence
+    ]) if evidence else "No evidence available"
     
     prompt = f"""You are an LLM Judge evaluating a hallucination detection result.
 
-    IMPORTANT: Use the SAME scale as the OpenAI detector: 0 means the Response is fully ACCURATE and 10 means the Response is COMPLETELY FABRICATED/UNSUPPORTED.
+IMPORTANT: Use the SAME scale as the OpenAI detector: 0 means the Response is fully ACCURATE and 10 means the Response is COMPLETELY FABRICATED/UNSUPPORTED.
+
 Return EXACTLY ONE JSON OBJECT (no surrounding text, no code fences) with these fields:
 {{
   "final_score": <number 0-10>,
@@ -204,21 +218,13 @@ Return EXACTLY ONE JSON OBJECT (no surrounding text, no code fences) with these 
   "confidence": <number 0.0-1.0>
 }}
 
-Examples (must follow the same numeric scale):
-1) If the evidence fully supports the response:
-{{"final_score": 0.0, "agreement":"agree", "judge_reasoning":"Evidence supports claim; no hallucination found.","confidence":0.95}}
-
-2) If evidence contradicts the response strongly:
-{{"final_score": 10.0, "agreement":"adjusted", "judge_reasoning":"Evidence contradicts main claim; it's fabricated.","confidence":0.9}}
-
-
 Original Prompt:
 \"\"\"{premise}\"\"\"
 
 Response Being Evaluated:
 \"\"\"{hypothesis}\"\"\"
 
-Evidence from Knowledge Base:
+Evidence (includes both local knowledge base and web sources):
 {evidence_text}
 
 OpenAI's Analysis:
@@ -230,14 +236,12 @@ Your task: Review this analysis and either AGREE or ADJUST the score based on:
 1. Does the evidence support or contradict the response?
 2. Is OpenAI's score reasonable?
 3. Are there any missed hallucinations or false positives?
-
 """
 
     try:
         print(f"\n{'='*60}")
         print(f"Calling Gemini Judge...")
         
-        # Try different model formats for free tier
         try:
             model = genai.GenerativeModel('models/gemini-2.5-flash')
         except:
@@ -279,7 +283,6 @@ Your task: Review this analysis and either AGREE or ADJUST the score based on:
             
     except Exception as e:
         print(f"✗ Gemini Judge Error: {str(e)}")
-        # Fallback to OpenAI score if Gemini fails
         return {
             "final_score": openai_result['hallucination_score'],
             "agreement": "fallback",
@@ -296,11 +299,9 @@ async def analyze_hallucination(request: AnalysisRequest):
         print(f"{'='*80}")
         print(f"Prompt: {request.prompt[:150]}...")
         print(f"Response: {request.response[:150]}...")
+        print(f"Web Search Enabled: {request.use_web_search}")
         print(f"{'='*80}")
 
-        # Validate temperature (no longer used but keep for backward compatibility)
-        # Temperature is now always 0.0 for consistency
-        
         # ---------------- Quick arithmetic check ----------------
         expr = extract_math_from_prompt(request.prompt or "")
         
@@ -335,6 +336,7 @@ async def analyze_hallucination(request: AnalysisRequest):
                             explanation=f"Simple arithmetic verified. Expression `{expr}` = {expected} ✓",
                             evidence=None,
                             rag_used=False,
+                            web_search_used=False,
                             openai_score=0.0,
                             gemini_score=0.0,
                             analysis_style="Deterministic"
@@ -348,29 +350,54 @@ async def analyze_hallucination(request: AnalysisRequest):
                             explanation=f"Arithmetic error. Expected {expected}, got {resp_val} ✗",
                             evidence=None,
                             rag_used=False,
+                            web_search_used=False,
                             openai_score=10.0,
                             gemini_score=10.0,
                             analysis_style="Deterministic"
                         )
 
-        # ---------------- RAG Evidence Retrieval ----------------
+        # ---------------- Enhanced RAG Evidence Retrieval with Web Search ----------------
         evidence = None
         evidence_text = ""
         rag_used = False
+        web_search_used = False
         
-        if rag_retriever is not None:
-            print("Retrieving evidence from RAG...")
+        if rag_retriever is not None and request.use_rag:
+            print("Retrieving evidence from Enhanced RAG (with web search fallback)...")
             rag_used = True
-            evidence = rag_retriever.retrieve(request.response, k=3)
             
-            if evidence:
-                evidence_text = "\n".join([
-                    f"{i+1}. {e.get('document', '')} (Score: {e.get('score', 0):.2f})"
-                    for i, e in enumerate(evidence)
-                ])
-                print(f"✓ Retrieved {len(evidence)} documents")
-            else:
-                print("No relevant documents found")
+            # Temporarily disable web search if requested
+            original_web_setting = rag_retriever.enable_web_search
+            if not request.use_web_search:
+                rag_retriever.enable_web_search = False
+            
+            try:
+                # IMPORTANT: Search using the PROMPT, not the response
+                # This finds evidence relevant to what was asked, not what was claimed
+                search_query = request.prompt
+                
+                # For specific factual queries, extract the key question
+                # e.g., "what is the aqi index of delhi" -> good search query
+                evidence = rag_retriever.retrieve(search_query, k=5)
+                
+                # Check if web search was used
+                if evidence:
+                    web_search_used = any(e.get('source_type') == 'web' for e in evidence)
+                    
+                    evidence_text = "\n".join([
+                        f"{i+1}. [{e.get('source_type', 'unknown').upper()}] {e.get('document', '')} (Relevance: {e.get('relevance', 0):.2f})"
+                        for i, e in enumerate(evidence)
+                    ])
+                    
+                    local_count = sum(1 for e in evidence if e.get('source_type') == 'local')
+                    web_count = sum(1 for e in evidence if e.get('source_type') == 'web')
+                    
+                    print(f"✓ Retrieved {len(evidence)} documents (Local: {local_count}, Web: {web_count})")
+                else:
+                    print("No relevant documents found")
+            finally:
+                # Restore original web search setting
+                rag_retriever.enable_web_search = original_web_setting
 
         # ---------------- OpenAI Analysis ----------------
         try:
@@ -395,7 +422,6 @@ async def analyze_hallucination(request: AnalysisRequest):
         # ---------------- Build explanation ----------------
         final_score = judge_result['final_score']
         
-        # Calculate analysis style based on confidence and agreement
         score_difference = abs(openai_result['hallucination_score'] - final_score)
         analysis_style = calculate_analysis_style(
             confidence=judge_result['confidence'],
@@ -420,7 +446,13 @@ async def analyze_hallucination(request: AnalysisRequest):
         explanation = base_explanation + judge_note + "\n\n" + openai_result.get('reasoning', '')
 
         if rag_used and evidence:
-            explanation += f"\n\n📚 Evidence: {len(evidence)} supporting documents analyzed"
+            local_count = sum(1 for e in evidence if e.get('source_type') == 'local')
+            web_count = sum(1 for e in evidence if e.get('source_type') == 'web')
+            
+            if web_search_used:
+                explanation += f"\n\n📚 Evidence: {local_count} local + 🌐 {web_count} web sources analyzed"
+            else:
+                explanation += f"\n\n📚 Evidence: {len(evidence)} local documents analyzed"
 
         print(f"\n{'='*80}")
         print(f"FINAL RESULTS:")
@@ -428,6 +460,7 @@ async def analyze_hallucination(request: AnalysisRequest):
         print(f"Gemini Score: {final_score}/10")
         print(f"Agreement: {judge_result['agreement']}")
         print(f"Analysis Style: {analysis_style}")
+        print(f"Web Search Used: {web_search_used}")
         print(f"{'='*80}\n")
 
         return AnalysisResponse(
@@ -438,6 +471,7 @@ async def analyze_hallucination(request: AnalysisRequest):
             explanation=explanation,
             evidence=evidence if rag_used else None,
             rag_used=rag_used,
+            web_search_used=web_search_used,
             judge_explanation=judge_result['judge_reasoning'],
             openai_score=openai_result['hallucination_score'],
             gemini_score=final_score,
@@ -459,6 +493,7 @@ async def health_check():
     return {
         "status": "healthy",
         "rag_initialized": rag_retriever is not None,
+        "web_search_enabled": rag_retriever.enable_web_search if rag_retriever else False,
         "openai_api_key_set": openai_key_set,
         "gemini_api_key_set": gemini_key_set
     }
