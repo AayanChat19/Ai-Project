@@ -12,7 +12,7 @@ A comprehensive AI hallucination detection system with RAG-enhanced verification
 - **Source Reliability Ranking**: Prioritizes evidence from high-quality sources
 - **Chrome Extension**: Easy-to-use browser interface for real-time verification
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 hallucination-detector/
@@ -93,7 +93,7 @@ The API will be available at `http://localhost:8000`
    - Paste prompt and response to analyze
    - View hallucination score and evidence
 
-## 🏗️ Architecture
+## Architecture
 
 ### Detection Pipeline
 
